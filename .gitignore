@@ -1,0 +1,8 @@
+# Musik bleibt lokal (Urheberrecht)
+Beispiellieder/
+*.mp3
+*.wav
+*.m4a
+*.flac
+# Build für claude.ai (wird mit "node build.js" erzeugt)
+dist/

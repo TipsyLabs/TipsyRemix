@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>TipsyRemix</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow:wght@500;600;700&family=Barlow+Condensed:wght@500;600;700&display=swap">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="logo"><span class="logo-mark"></span><span class="logo-text">Tipsy<b>Remix</b></span></div>
+      <div class="recordings" id="recordings"></div>
+      <div class="topbar-tools">
+        <div class="master-meter">
+          <div class="meter h" id="masterMeter"><div class="meter-cover"></div></div>
+          <span>Master</span>
+        </div>
+        <div class="master-knob" id="masterSlot"></div>
+        <button class="btn rec" id="recBtn" title="Mix als MP3 (320 kbps) aufnehmen"><span class="rec-dot"></span>REC <span id="recTime"></span></button>
+      </div>
+    </header>
+
+    <main class="console">
+      <section class="deck deck-a" id="deckA"></section>
+
+      <section class="mixer">
+        <div class="strips">
+          <div class="strip deck-a" id="stripA"></div>
+          <div class="strip deck-b" id="stripB"></div>
+        </div>
+        <div class="xfader">
+          <div class="xf-labels">
+            <span class="xf-a">A</span>
+            <button class="btn small" id="xfCurve" title="Crossfader-Kurve">Smooth</button>
+            <span class="xf-b">B</span>
+          </div>
+          <div id="xfSlot"></div>
+        </div>
+      </section>
+
+      <section class="deck deck-b" id="deckB"></section>
+    </main>
+
+    <footer class="help">
+      <span>Regler: nach links/rechts ziehen</span>
+      <span>Doppeltipp = zurücksetzen</span>
+      <span>Wellenform: ziehen = Scrub/Pitch-Bend, zwei Finger = Zoom</span>
+      <span>Hot Cue lange drücken = löschen</span>
+      <span class="keys"><kbd>Q</kbd>/<kbd>W</kbd> <kbd>O</kbd>/<kbd>P</kbd> Play/Cue · <kbd>E</kbd>/<kbd>I</kbd> Echo · <kbd>←</kbd><kbd>→</kbd> Crossfader</span>
+    </footer>
+  </div>
+  <script src="lib/lame.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

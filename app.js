@@ -32,6 +32,9 @@ const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
 // Skalierung der ganzen Konsole (siehe „Ein Bildschirm“ am Ende); Canvas in voller Schärfe rendern
 let uiScale = 1;
+// Wellenform-Modus: 'smudge' (Scrub/Pitch-Bend) oder 'vinyl' (Scratch) – pro Gerät gemerkt
+let waveMode = 'smudge';
+try { if (localStorage.getItem('tipsyremix.waveMode') === 'vinyl') waveMode = 'vinyl'; } catch (_) { /* egal */ }
 const canvasDpr = () => (window.devicePixelRatio || 1) * Math.max(1, uiScale);
 const mod = (a, n) => ((a % n) + n) % n;
 const dbToGain = db => Math.pow(10, db / 20);
@@ -175,6 +178,50 @@ class RecorderProcessor extends AudioWorkletProcessor {
   }
 }
 registerProcessor('recorder', RecorderProcessor);
+
+// Vinyl-Scratch: spielt den Track an einer Position, die dem Finger folgt –
+// vorwärts, rückwärts, Stillstand. Geschwindigkeit (= Tonhöhe) ergibt sich
+// aus der Fingerbewegung, wie bei einer Platte unter der Hand.
+class ScratchProcessor extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.l = null; this.r = null; this.len = 0;
+    this.p = 0; this.t = 0;                              // Position / Ziel in Samples
+    this.k = 1 - Math.exp(-1 / (0.016 * sampleRate));    // Trägheit der Platte ~16 ms
+    this.g = 0; this.gt = 0;                             // Ein-/Ausblenden gegen Klicks
+    this.hx = [0, 0]; this.hy = [0, 0];                  // Gleichspannungsfilter
+    this.port.onmessage = e => {
+      const m = e.data;
+      if (m.type === 'load') { this.l = m.l; this.r = m.r; this.len = m.l.length; this.gt = 0; this.g = 0; }
+      else if (m.type === 'start') { this.p = this.t = m.pos * sampleRate; this.gt = 1; }
+      else if (m.type === 'target') { this.t = m.pos * sampleRate; }
+      else if (m.type === 'stop') { this.gt = 0; }
+    };
+  }
+  process(inputs, outputs) {
+    const out = outputs[0], oL = out[0], oR = out[1] || out[0];
+    if (!this.l || (this.gt === 0 && this.g < 1e-4)) { oL.fill(0); oR.fill(0); this.g = 0; return true; }
+    const L = this.l, R = this.r, n = this.len, s = 1 / 32768, hx = this.hx, hy = this.hy;
+    for (let i = 0; i < oL.length; i++) {
+      this.p += (this.t - this.p) * this.k;
+      this.g += (this.gt - this.g) * 0.004;
+      const p = this.p;
+      let a = 0, b = 0;
+      if (p >= 0 && p < n - 1) {
+        const j = p | 0, f = p - j;
+        a = (L[j] + (L[j + 1] - L[j]) * f) * s;
+        b = (R[j] + (R[j + 1] - R[j]) * f) * s;
+      }
+      // Hochpass ~10 Hz: Stillstand der Platte = Stille statt Gleichspannung
+      const ya = a - hx[0] + 0.9987 * hy[0]; hx[0] = a; hy[0] = ya;
+      const yb = b - hx[1] + 0.9987 * hy[1]; hx[1] = b; hy[1] = yb;
+      oL[i] = ya * this.g;
+      oR[i] = yb * this.g;
+    }
+    return true;
+  }
+}
+registerProcessor('scratch', ScratchProcessor);
 `;
 
 let recNode = null;
@@ -210,6 +257,13 @@ async function setupWorklets(decks) {
     d.attachKeyLock(new AudioWorkletNode(ctx, 'keylock', {
       numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2],
     }));
+    try {
+      d.attachScratch(new AudioWorkletNode(ctx, 'scratch', {
+        numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [2],
+      }));
+    } catch (err) {
+      console.warn('Vinyl-Scratch nicht verfügbar:', err);
+    }
   }
   recNode = new AudioWorkletNode(ctx, 'recorder', {
     numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2],
@@ -435,7 +489,7 @@ function createKnob({ label, min = -1, max = 1, value = 0, def = value, bipolar 
   return el;
 }
 
-function createFader({ orient = 'v', min = 0, max = 1, value = 0, def = value, center = false, onInput }) {
+function createFader({ orient = 'v', min = 0, max = 1, value = 0, def = value, center = false, onInput, onCut }) {
   const el = document.createElement('div');
   el.className = `fader ${orient}`;
   el.innerHTML = `<div class="fader-rail">${center ? '<div class="fader-center"></div>' : ''}<div class="fader-thumb"></div></div>`;
@@ -466,6 +520,22 @@ function createFader({ orient = 'v', min = 0, max = 1, value = 0, def = value, c
   el.addEventListener('pointerdown', e => {
     e.preventDefault();
     el.setPointerCapture(e.pointerId);
+    // Finger auf der Schiene unterhalb des Griffs: Kanal stumm, solange er liegt
+    if (onCut && vertical && !thumb.contains(e.target) && e.clientY > thumb.getBoundingClientRect().bottom) {
+      const id = e.pointerId;
+      el.classList.add('cut');
+      onCut(true);
+      const end = ev => {
+        if (ev.pointerId !== id) return;
+        el.removeEventListener('pointerup', end);
+        el.removeEventListener('pointercancel', end);
+        el.classList.remove('cut');
+        onCut(false);
+      };
+      el.addEventListener('pointerup', end);
+      el.addEventListener('pointercancel', end);
+      return;
+    }
     const r = rail.getBoundingClientRect();
     const size = vertical ? r.height : r.width;
     const sx = e.clientX, sy = e.clientY;
@@ -616,6 +686,9 @@ class Deck {
     this.filterMute = ctx.createGain();
     this.filters[1].connect(this.filterMute);
     this.fader = ctx.createGain();
+    // Mute: Finger auf der Fader-Schiene unterhalb des Griffs (Cut, solange gedrückt)
+    this.cut = ctx.createGain();
+    this.fader.connect(this.cut);
 
     // Echo Out: Die Delay-Line nimmt ständig den letzten Takt auf (Wet stumm).
     // Beim Auslösen wird die Aufnahme geschlossen, Wet + Feedback geöffnet.
@@ -634,7 +707,7 @@ class Deck {
     this.echoFb.gain.value = 0;
     this.echoWet = ctx.createGain();
     this.echoWet.gain.value = 0;
-    this.fader.connect(this.echoSend);
+    this.cut.connect(this.echoSend);
     this.echoSend.connect(this.echoDelay);
     this.echoDelay.connect(this.echoHp);
     this.echoHp.connect(this.echoLp);
@@ -651,8 +724,8 @@ class Deck {
     this.norm.connect(this.trim);
     for (const b of Object.values(this.bands)) b.connect(this.filters[0]);
     this.filterMute.connect(this.fader);
-    this.fader.connect(this.xf);
-    this.fader.connect(this.analyser);
+    this.cut.connect(this.xf);
+    this.cut.connect(this.analyser);
     this.echoWet.connect(this.xf);
     this.echoWet.connect(this.analyser);
     this.xf.connect(master);
@@ -676,6 +749,9 @@ class Deck {
     this.firstBeat = 0;
     this.syncArmed = false;
     this.keyLock = false;
+    this.scratchNode = null;
+    this.scratching = false;
+    this.scratchWasPlaying = false;
     this.zoomSpan = 6;
     this.updateEchoTime();
 
@@ -749,6 +825,8 @@ class Deck {
 
   togglePlay() {
     if (this.cuePreview) { this.cuePreview = false; return; }  // Cue-Vorschau in Play übernehmen
+    // Während die Hand auf der Platte liegt: Motor an/aus – läuft nach dem Loslassen weiter
+    if (this.scratching) { this.scratchWasPlaying = !this.scratchWasPlaying; return; }
     this.playing ? this.pause() : this.play();
   }
 
@@ -924,6 +1002,53 @@ class Deck {
 
   setTrim(v) { this.trim.gain.setTargetAtTime(dbToGain(v * 12), ctx.currentTime, 0.01); }
   setFader(v) { this.fader.gain.setTargetAtTime(v * v, ctx.currentTime, 0.01); }
+  setCut(on) { this.cut.gain.setTargetAtTime(on ? 0 : 1, ctx.currentTime, 0.002); }
+
+  /* ---- Vinyl-Scratch ---- */
+
+  attachScratch(node) {
+    this.scratchNode = node;
+    node.connect(this.norm);   // am Key Lock vorbei: beim Scratchen soll die Tonhöhe mitgehen
+    if (this.buffer) this.sendScratchData();
+  }
+
+  // Track als 16-Bit-Kopie an den Scratch-Player geben (halber Speicher, reicht fürs Scratchen)
+  sendScratchData() {
+    if (!this.scratchNode || !this.buffer) return;
+    const toI16 = ch => {
+      const f = this.buffer.getChannelData(ch), o = new Int16Array(f.length);
+      for (let i = 0; i < f.length; i++) {
+        const s = f[i];
+        o[i] = s <= -1 ? -32768 : s >= 1 ? 32767 : s * 32767;
+      }
+      return o;
+    };
+    const l = toI16(0);
+    const r = this.buffer.numberOfChannels > 1 ? toI16(1) : l;
+    this.scratchNode.port.postMessage({ type: 'load', l, r }, r === l ? [l.buffer] : [l.buffer, r.buffer]);
+  }
+
+  startScratch() {
+    if (this.scratching) return;
+    this.scratchWasPlaying = this.playing;
+    this.cuePreview = false;
+    this.pause();
+    this.scratching = true;
+    this.scratchNode.port.postMessage({ type: 'start', pos: this.offset });
+  }
+
+  scratchTo(pos) {
+    if (!this.scratching) return;
+    this.offset = clamp(pos, 0, this.duration - 0.001);
+    this.scratchNode.port.postMessage({ type: 'target', pos: this.offset });
+  }
+
+  endScratch() {
+    if (!this.scratching) return;
+    this.scratchNode.port.postMessage({ type: 'stop' });
+    this.scratching = false;
+    if (this.scratchWasPlaying) this.play();
+  }
 
   setEq(band, v) {
     this.bands[band].gain.setTargetAtTime(eqGain(v), ctx.currentTime, 0.01);
@@ -1022,6 +1147,8 @@ class Deck {
       // Lautheit angleichen (Ziel ca. -14 dBFS RMS)
       const rmsDb = 20 * Math.log10(w.rms + 1e-9);
       this.norm.gain.value = dbToGain(clamp(-14 - rmsDb, -12, 6));
+      this.scratching = false;
+      this.sendScratchData();
 
       setText(this.el.title, file.name.replace(/\.[^.]+$/, ''));
       this.el.title.title = file.name;
@@ -1130,7 +1257,9 @@ class Deck {
     bindNudge(el.nudgeDown, 0.96);
     bindNudge(el.nudgeUp, 1.04);
 
-    // Wellenform: 1 Finger ziehen = pausiert scrubben / läuft Pitch-Bend (Jogwheel),
+    // Wellenform, 1 Finger:
+    //   SMUDGE – pausiert scrubben / läuft Pitch-Bend (Jogwheel)
+    //   VINYL  – Hand auf der Platte: Track folgt dem Finger (Scratch), loslassen = weiter
     // 2 Finger auseinander/zusammen = Zoom
     const z = el.zoom;
     const touches = new Map();
@@ -1140,7 +1269,8 @@ class Deck {
       return Math.max(10, Math.abs(a.x - b.x));
     };
     const endDrag = () => {
-      if (drag && drag.wasPlaying) this.setNudge(1);
+      if (drag && drag.vinyl) this.endScratch();
+      else if (drag && drag.wasPlaying) this.setNudge(1);
       drag = null;
     };
     z.addEventListener('pointerdown', e => {
@@ -1152,7 +1282,12 @@ class Deck {
         endDrag();
         pinch = { dist: pinchDist(), span: this.zoomSpan };
       } else if (touches.size === 1) {
-        drag = { startX: e.clientX, lastX: e.clientX, wasPlaying: this.playing };
+        if (waveMode === 'vinyl' && this.scratchNode) {
+          this.startScratch();
+          drag = { vinyl: true, startX: e.clientX, startPos: this.offset };
+        } else {
+          drag = { startX: e.clientX, lastX: e.clientX, wasPlaying: this.playing };
+        }
       }
     });
     z.addEventListener('pointermove', e => {
@@ -1160,6 +1295,10 @@ class Deck {
       touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
       if (pinch && touches.size >= 2) {
         this.zoomSpan = clamp(pinch.span * pinch.dist / pinchDist(), 1.5, 40);
+      } else if (drag && drag.vinyl) {
+        // Finger nach rechts zieht die Platte zurück, nach links schiebt sie vor
+        const secPerPx = this.zoomSpan / this.zoomW / uiScale;
+        this.scratchTo(drag.startPos - (e.clientX - drag.startX) * secPerPx);
       } else if (drag) {
         if (drag.wasPlaying) {
           this.setNudge(1 - clamp((e.clientX - drag.startX) / 300, -0.3, 0.3));
@@ -1366,8 +1505,9 @@ class Deck {
     setText(el.bpm, this.bpm ? (this.bpm * this.rate).toFixed(1) : '---.-');
     const pct = (this.rate - 1) * 100;
     setText(el.tempoVal, (pct >= 0 ? '+' : '') + pct.toFixed(2) + '%');
-    el.play.classList.toggle('on', this.playing);
-    setText(el.play, this.playing ? '❚❚' : '▶');
+    const running = this.playing || (this.scratching && this.scratchWasPlaying);
+    el.play.classList.toggle('on', running);
+    setText(el.play, running ? '❚❚' : '▶');
     el.cue.classList.toggle('on', !!this.buffer && !this.playing && Math.abs(pos - this.cuePoint) < 0.02);
     const o = this.other;
     const synced = this.bpm && o && o.bpm && Math.abs(this.bpm * this.rate - o.bpm * o.rate) < 0.02;
@@ -1415,7 +1555,11 @@ function buildStrip(deck, container) {
   const row = document.createElement('div');
   row.className = 'fader-row';
   const meter = createMeter('v');
-  const fader = createFader({ orient: 'v', min: 0, max: 1, value: 1, def: 1, onInput: v => deck.setFader(v) });
+  const fader = createFader({
+    orient: 'v', min: 0, max: 1, value: 1, def: 1,
+    onInput: v => deck.setFader(v),
+    onCut: on => deck.setCut(on),
+  });
   row.append(meter, fader);
   container.append(row);
   deck.meterEl = meter.firstChild;
@@ -1458,6 +1602,25 @@ xfCurveBtn.addEventListener('click', () => {
   applyCrossfader();
 });
 applyCrossfader();
+
+/* ---------------- Wellenform-Modus: Smudge / Vinyl ---------------- */
+
+const modeSwitch = document.getElementById('waveMode');
+function setWaveMode(mode) {
+  waveMode = mode;
+  for (const b of modeSwitch.querySelectorAll('.mode-btn')) {
+    const on = b.dataset.mode === mode;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-checked', String(on));
+  }
+  document.documentElement.dataset.waveMode = mode;
+  try { localStorage.setItem('tipsyremix.waveMode', mode); } catch (_) { /* egal */ }
+}
+modeSwitch.addEventListener('click', e => {
+  const b = e.target.closest('.mode-btn');
+  if (b) setWaveMode(b.dataset.mode);
+});
+setWaveMode(waveMode);
 
 /* ---------------- Master & Aufnahme ---------------- */
 

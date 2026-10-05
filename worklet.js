@@ -94,3 +94,47 @@ class RecorderProcessor extends AudioWorkletProcessor {
   }
 }
 registerProcessor('recorder', RecorderProcessor);
+
+// Vinyl-Scratch: spielt den Track an einer Position, die dem Finger folgt –
+// vorwärts, rückwärts, Stillstand. Geschwindigkeit (= Tonhöhe) ergibt sich
+// aus der Fingerbewegung, wie bei einer Platte unter der Hand.
+class ScratchProcessor extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.l = null; this.r = null; this.len = 0;
+    this.p = 0; this.t = 0;                              // Position / Ziel in Samples
+    this.k = 1 - Math.exp(-1 / (0.016 * sampleRate));    // Trägheit der Platte ~16 ms
+    this.g = 0; this.gt = 0;                             // Ein-/Ausblenden gegen Klicks
+    this.hx = [0, 0]; this.hy = [0, 0];                  // Gleichspannungsfilter
+    this.port.onmessage = e => {
+      const m = e.data;
+      if (m.type === 'load') { this.l = m.l; this.r = m.r; this.len = m.l.length; this.gt = 0; this.g = 0; }
+      else if (m.type === 'start') { this.p = this.t = m.pos * sampleRate; this.gt = 1; }
+      else if (m.type === 'target') { this.t = m.pos * sampleRate; }
+      else if (m.type === 'stop') { this.gt = 0; }
+    };
+  }
+  process(inputs, outputs) {
+    const out = outputs[0], oL = out[0], oR = out[1] || out[0];
+    if (!this.l || (this.gt === 0 && this.g < 1e-4)) { oL.fill(0); oR.fill(0); this.g = 0; return true; }
+    const L = this.l, R = this.r, n = this.len, s = 1 / 32768, hx = this.hx, hy = this.hy;
+    for (let i = 0; i < oL.length; i++) {
+      this.p += (this.t - this.p) * this.k;
+      this.g += (this.gt - this.g) * 0.004;
+      const p = this.p;
+      let a = 0, b = 0;
+      if (p >= 0 && p < n - 1) {
+        const j = p | 0, f = p - j;
+        a = (L[j] + (L[j + 1] - L[j]) * f) * s;
+        b = (R[j] + (R[j + 1] - R[j]) * f) * s;
+      }
+      // Hochpass ~10 Hz: Stillstand der Platte = Stille statt Gleichspannung
+      const ya = a - hx[0] + 0.9987 * hy[0]; hx[0] = a; hy[0] = ya;
+      const yb = b - hx[1] + 0.9987 * hy[1]; hx[1] = b; hy[1] = yb;
+      oL[i] = ya * this.g;
+      oR[i] = yb * this.g;
+    }
+    return true;
+  }
+}
+registerProcessor('scratch', ScratchProcessor);

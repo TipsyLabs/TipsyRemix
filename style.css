@@ -56,11 +56,34 @@ body {
 }
 
 /* ---------- Header ---------- */
+/* Drei Spalten: Logo + Aufnahmen | Modus-Schalter (genau über dem Mixer) | Master + REC */
 .topbar {
-  display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px 18px;
+  display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 12px 18px;
   padding: 8px 14px;
   background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
 }
+.topbar-left { display: flex; align-items: center; gap: 14px; min-width: 0; }
+.topbar-tools { justify-self: end; }
+
+/* Smudge / Vinyl */
+.mode-switch {
+  display: inline-grid; grid-template-columns: 1fr 1fr; padding: 4px; gap: 4px;
+  background: var(--well); border: 1px solid var(--line); border-radius: 12px;
+}
+.mode-btn {
+  min-height: 40px; min-width: 92px; padding: 0 14px;
+  border: 0; border-radius: 8px; background: transparent; color: var(--muted);
+  font: 700 15px/1 var(--font-cond); letter-spacing: 1.5px; text-transform: uppercase;
+  cursor: pointer; touch-action: manipulation;
+  transition: background .12s, color .12s, box-shadow .12s;
+}
+.mode-btn:focus-visible { outline: 2px solid var(--text); outline-offset: 1px; }
+.mode-btn[data-mode="smudge"].on { background: var(--raised); color: var(--text); box-shadow: inset 0 0 0 1px var(--line); }
+.mode-btn[data-mode="vinyl"].on {
+  background: radial-gradient(circle at 50% 50%, #3a3f50 0 18%, #15181f 19% 100%);
+  color: var(--text); box-shadow: inset 0 0 0 1px #4a5268, 0 0 14px rgba(255, 255, 255, .08);
+}
+html[data-wave-mode="vinyl"] .wave-zoom { cursor: pointer; }
 .logo { display: flex; align-items: center; gap: 10px; font-family: var(--font-cond); font-weight: 600; font-size: 26px; letter-spacing: .5px; }
 .logo-text b { font-weight: 700; color: var(--a); }
 .logo-mark {
@@ -267,6 +290,9 @@ body {
 .fader.v .fader-thumb::after { left: 5px; right: 5px; top: 50%; height: 3px; transform: translateY(-50%); }
 .fader.h .fader-thumb::after { top: 5px; bottom: 5px; left: 50%; width: 3px; transform: translateX(-50%); }
 .fader.active .fader-thumb { box-shadow: 0 0 0 2px var(--accent), 0 3px 10px rgba(0, 0, 0, .6); }
+/* Mute per Finger unter dem Griff: Schiene leuchtet rot */
+.fader.cut .fader-rail::before { background: var(--rec); border-color: var(--rec); box-shadow: 0 0 12px color-mix(in srgb, var(--rec) 70%, transparent); }
+.fader.cut .fader-thumb { opacity: .55; }
 
 /* ---------- Meter ---------- */
 .meter { position: relative; overflow: hidden; border-radius: 3px; border: 1px solid var(--line); }
@@ -310,7 +336,7 @@ html.fit .app {
 html.fit .help { display: none; }
 
 /* Aufnahmen sitzen in der Kopfzeile und schieben nichts nach unten */
-.topbar .recordings { flex: 1 1 0; min-width: 0; margin: 0; flex-wrap: nowrap; overflow-x: auto; justify-content: center; scrollbar-width: none; }
+.topbar .recordings { flex: 1 1 0; min-width: 0; margin: 0; flex-wrap: nowrap; overflow-x: auto; justify-content: flex-start; scrollbar-width: none; }
 .topbar .recordings::-webkit-scrollbar { display: none; }
 .rec-item { white-space: nowrap; flex: none; }
 
@@ -344,6 +370,8 @@ html[data-layout="port"] .group-hint { display: none; }
 html[data-layout="flow"] .console { grid-template-columns: minmax(0, 1fr); grid-template-areas: "a" "m" "b"; }
 html[data-layout="flow"] .strips { grid-template-columns: minmax(0, 1fr); }
 html[data-layout="flow"] .meter.h { width: 90px; }
+html[data-layout="flow"] .topbar { grid-template-columns: minmax(0, 1fr) auto; }
+html[data-layout="flow"] .mode-switch { grid-column: 1 / -1; justify-self: center; order: 3; }
 
 @media (prefers-reduced-motion: reduce) {
   .logo-mark, .btn.rec.on .rec-dot, .btn.echo.on, .btn.hotcue.deleted { animation: none; }

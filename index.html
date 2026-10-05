@@ -15,8 +15,14 @@
 <body>
   <div class="app">
     <header class="topbar">
-      <div class="logo"><span class="logo-mark"></span><span class="logo-text">Tipsy<b>Remix</b></span></div>
-      <div class="recordings" id="recordings"></div>
+      <div class="topbar-left">
+        <div class="logo"><span class="logo-mark"></span><span class="logo-text">Tipsy<b>Remix</b></span></div>
+        <div class="recordings" id="recordings"></div>
+      </div>
+      <div class="mode-switch" id="waveMode" role="radiogroup" aria-label="Wellenform-Modus">
+        <button class="mode-btn" data-mode="smudge" role="radio" title="Wellenform ziehen = Scrub / Pitch-Bend">Smudge</button>
+        <button class="mode-btn" data-mode="vinyl" role="radio" title="Wellenform = Platte: anfassen stoppt, ziehen scratcht">Vinyl</button>
+      </div>
       <div class="topbar-tools">
         <div class="master-meter">
           <div class="meter h" id="masterMeter"><div class="meter-cover"></div></div>
@@ -53,6 +59,7 @@
       <span>Doppeltipp = zurücksetzen</span>
       <span>Wellenform: ziehen = Scrub/Pitch-Bend, zwei Finger = Zoom</span>
       <span>Hot Cue lange drücken = löschen</span>
+      <span>Finger unter dem Kanalfader-Griff = Mute</span>
       <span class="keys"><kbd>Q</kbd>/<kbd>W</kbd> <kbd>O</kbd>/<kbd>P</kbd> Play/Cue · <kbd>E</kbd>/<kbd>I</kbd> Echo · <kbd>←</kbd><kbd>→</kbd> Crossfader</span>
     </footer>
   </div>

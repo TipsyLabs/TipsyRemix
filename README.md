@@ -9,6 +9,8 @@
 - Tempo ±8/16/50 %, SYNC (Tempo + Beat), Key Lock (Tonhöhe bleibt gleich)
 - Mixer: Gain, 3-Band-Isolator (Bass/Mitten/Höhen bis Kill), Filter (an den Anschlägen stumm), Kanalfader, Crossfader
 - Echo Out (1 Takt, Ausklingzeit 1–5 s)
+- Kanal-Mute: Finger auf die Fader-Schiene unter den Griff legen (stumm, solange er liegt)
+- Wellenform-Modus SMUDGE (Scrub/Pitch-Bend) oder VINYL (Platte anfassen = Stopp, ziehen = Scratch vor/zurück)
 - Aufnahme des Mixes als MP3 (320 kbps)
 - Alles auf einem Bildschirm: die Konsole skaliert sich automatisch auf iPad quer/hoch
 

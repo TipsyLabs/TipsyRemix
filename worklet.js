@@ -97,11 +97,14 @@ registerProcessor('recorder', RecorderProcessor);
 
 // Vinyl-Scratch: spielt den Track an der Position, an der der Finger war –
 // vorwärts, rückwärts, Stillstand. Jede Fingerposition kommt mit ihrem
-// Zeitpunkt; der Player fährt diese Punkte mit 25 ms Versatz als glatte
+// Zeitpunkt; der Player fährt diese Punkte mit kleinem Versatz als glatte
 // Bewegung nach. So klingt es auch dann sauber, wenn der Touchscreen nur
 // 60–120 Positionen pro Sekunde und unregelmäßig liefert.
-const SCRATCH_DELAY = 0.025;
-const SCRATCH_COAST = 0.03;   // kommt ein Fingerpunkt zu spät: so lange in gleicher Richtung weiterlaufen
+// Der Versatz passt sich dem Gerät an: Er wird gemessen (wie spät kommen die
+// Punkte an, wie groß sind die Abstände) – auf dem iPad läuft die Audio-Uhr
+// in größeren Schritten als am PC, ein fester Wert war dort zu knapp.
+const SCRATCH_DELAY_MIN = 0.015, SCRATCH_DELAY_MAX = 0.12, SCRATCH_DELAY_START = 0.06;
+const SCRATCH_COAST = 0.03;   // kommt ein Fingerpunkt doch zu spät: so lange in gleicher Richtung weiterlaufen
 class ScratchProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
@@ -114,19 +117,32 @@ class ScratchProcessor extends AudioWorkletProcessor {
     this.hx = [0, 0]; this.hy = [0, 0];                  // Gleichspannungsfilter
     this.lp = [0, 0, 0, 0];                              // Anti-Aliasing (2 Pole je Kanal)
     this.speed = 0;                                      // Tempo im letzten Block (1 = normal)
+    this.delay = SCRATCH_DELAY_START;                    // aktueller Versatz (s)
+    this.late = 0; this.gap = 0;                         // gemessene Verspätung / Punktabstand (Spitzenwerte)
+    this.fresh = true;                                   // erste Bewegung nach dem Anfassen?
     this.port.onmessage = e => {
       const m = e.data;
       if (m.type === 'load') { this.l = m.l; this.r = m.r; this.len = m.l.length; this.gt = 0; this.g = 0; }
-      else if (m.type === 'start') { this.p = m.pos * sampleRate; this.pts = [[m.time, this.p]]; this.vel = 0; this.gt = 1; }
+      else if (m.type === 'start') { this.p = m.pos * sampleRate; this.pts = [[m.time, this.p]]; this.vel = 0; this.gt = 1; this.fresh = true; }
       else if (m.type === 'move') {
         for (const [t, pos] of m.pts) {
           const last = this.pts[this.pts.length - 1];
+          if (last && t > last[0]) this.gap = Math.max(this.gap, Math.min(0.05, t - last[0]));
           if (!last || t > last[0]) this.pts.push([t, pos * sampleRate]);
           else last[1] = pos * sampleRate;               // gleicher Zeitpunkt: nur Position erneuern
         }
+        const newest = m.pts[m.pts.length - 1][0];
+        this.late = Math.max(this.late, currentTime - newest);
+        const want = this.wantDelay();
+        // Beim ersten Ziehen steht die Platte noch → Versatz darf sofort springen
+        if (this.fresh) { this.delay = Math.max(want, this.delay); this.fresh = false; }
+        else if (want > this.delay + 0.03) this.delay = want;
       }
       else if (m.type === 'stop') { this.gt = 0; }
     };
+  }
+  wantDelay() {
+    return Math.min(SCRATCH_DELAY_MAX, Math.max(SCRATCH_DELAY_MIN, this.late + this.gap + 0.004));
   }
   // Fingerposition zum Zeitpunkt t (linear zwischen zwei Fingerpunkten;
   // fehlt der nächste Punkt noch, kurz mit der letzten Geschwindigkeit weiter)
@@ -146,7 +162,15 @@ class ScratchProcessor extends AudioWorkletProcessor {
     const out = outputs[0], oL = out[0], oR = out[1] || out[0];
     if (!this.l || !this.pts.length || (this.gt === 0 && this.g < 1e-4)) { oL.fill(0); oR.fill(0); this.g = 0; return true; }
     const L = this.l, R = this.r, n = this.len, s = 1 / 32768, hx = this.hx, hy = this.hy, lp = this.lp;
-    const N = oL.length, t0 = currentTime - SCRATCH_DELAY, dt = 1 / sampleRate;
+    // Versatz nachführen: wachsen darf er immer, aber langsam (≤ 1,5 % Tempo, beim Scratchen unhörbar);
+    // schrumpfen und schnell anpassen nur, solange die Platte (fast) steht.
+    // Spitzenwerte vergessen langsam (≈ 4 ms pro Sekunde).
+    this.late = Math.max(-0.05, this.late - 0.00001);
+    this.gap = Math.max(0, this.gap - 0.00001);
+    const diff = this.wantDelay() - this.delay;
+    if (this.speed < 0.05) this.delay += Math.max(-0.0005, Math.min(0.0005, diff));
+    else if (diff > 0) this.delay += Math.min(0.00004, diff);
+    const N = oL.length, t0 = currentTime - this.delay, dt = 1 / sampleRate;
     // Tiefpass passend zur Geschwindigkeit: schnell gescratcht = sonst metallisches Aliasing
     const pStart = this.p;
     const fc = Math.min(20000, Math.max(300, 18000 / Math.max(1, this.speed)));

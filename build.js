@@ -23,5 +23,7 @@ ${app}
 `;
 fs.writeFileSync(path.join(out, 'index.html'), page);
 const w = app.match(/const WORKLET_CODE = `([\s\S]*?)`;/)[1];
-fs.writeFileSync(path.join(out, 'worklet.js'), w);
+fs.writeFileSync(path.join(out, "worklet.js"), w);
+// auch im Projekt-Hauptordner: GitHub Pages lädt das Audio-Modul von dort (zuverlässiger als data:-URL in Safari)
+fs.writeFileSync(path.join(proj, 'worklet.js'), '// Automatisch aus app.js (WORKLET_CODE) erzeugt – nicht von Hand ändern, sondern: node build.js\n' + w);
 console.log('index.html', (page.length / 1024).toFixed(0) + ' KB; worklet.js', w.length, 'Zeichen');

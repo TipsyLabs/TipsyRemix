@@ -179,45 +179,82 @@ class RecorderProcessor extends AudioWorkletProcessor {
 }
 registerProcessor('recorder', RecorderProcessor);
 
-// Vinyl-Scratch: spielt den Track an einer Position, die dem Finger folgt –
-// vorwärts, rückwärts, Stillstand. Geschwindigkeit (= Tonhöhe) ergibt sich
-// aus der Fingerbewegung, wie bei einer Platte unter der Hand.
+// Vinyl-Scratch: spielt den Track an der Position, an der der Finger war –
+// vorwärts, rückwärts, Stillstand. Jede Fingerposition kommt mit ihrem
+// Zeitpunkt; der Player fährt diese Punkte mit 25 ms Versatz als glatte
+// Bewegung nach. So klingt es auch dann sauber, wenn der Touchscreen nur
+// 60–120 Positionen pro Sekunde und unregelmäßig liefert.
+const SCRATCH_DELAY = 0.025;
+const SCRATCH_COAST = 0.03;   // kommt ein Fingerpunkt zu spät: so lange in gleicher Richtung weiterlaufen
 class ScratchProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
     this.l = null; this.r = null; this.len = 0;
-    this.p = 0; this.t = 0;                              // Position / Ziel in Samples
-    this.k = 1 - Math.exp(-1 / (0.016 * sampleRate));    // Trägheit der Platte ~16 ms
+    this.pts = [];                                       // [Zeit (s), Position (Samples)]
+    this.vel = 0;                                        // letzte Fingergeschwindigkeit (Samples/s)
+    this.p = 0;                                          // gespielte Position (Samples)
+    this.ks = 1 - Math.exp(-1 / (0.004 * sampleRate));   // Ecken abrunden (~4 ms)
     this.g = 0; this.gt = 0;                             // Ein-/Ausblenden gegen Klicks
     this.hx = [0, 0]; this.hy = [0, 0];                  // Gleichspannungsfilter
+    this.lp = [0, 0, 0, 0];                              // Anti-Aliasing (2 Pole je Kanal)
+    this.speed = 0;                                      // Tempo im letzten Block (1 = normal)
     this.port.onmessage = e => {
       const m = e.data;
       if (m.type === 'load') { this.l = m.l; this.r = m.r; this.len = m.l.length; this.gt = 0; this.g = 0; }
-      else if (m.type === 'start') { this.p = this.t = m.pos * sampleRate; this.gt = 1; }
-      else if (m.type === 'target') { this.t = m.pos * sampleRate; }
+      else if (m.type === 'start') { this.p = m.pos * sampleRate; this.pts = [[m.time, this.p]]; this.vel = 0; this.gt = 1; }
+      else if (m.type === 'move') {
+        for (const [t, pos] of m.pts) {
+          const last = this.pts[this.pts.length - 1];
+          if (!last || t > last[0]) this.pts.push([t, pos * sampleRate]);
+          else last[1] = pos * sampleRate;               // gleicher Zeitpunkt: nur Position erneuern
+        }
+      }
       else if (m.type === 'stop') { this.gt = 0; }
     };
   }
+  // Fingerposition zum Zeitpunkt t (linear zwischen zwei Fingerpunkten;
+  // fehlt der nächste Punkt noch, kurz mit der letzten Geschwindigkeit weiter)
+  targetAt(t) {
+    const P = this.pts;
+    while (P.length > 1 && P[1][0] <= t) {
+      this.vel = (P[1][1] - P[0][1]) / Math.max(1e-4, P[1][0] - P[0][0]);
+      P.shift();
+    }
+    const a = P[0];
+    if (t <= a[0]) return a[1];
+    if (P.length === 1) return a[1] + this.vel * Math.min(t - a[0], SCRATCH_COAST);
+    const b = P[1];
+    return a[1] + (b[1] - a[1]) * (t - a[0]) / (b[0] - a[0]);
+  }
   process(inputs, outputs) {
     const out = outputs[0], oL = out[0], oR = out[1] || out[0];
-    if (!this.l || (this.gt === 0 && this.g < 1e-4)) { oL.fill(0); oR.fill(0); this.g = 0; return true; }
-    const L = this.l, R = this.r, n = this.len, s = 1 / 32768, hx = this.hx, hy = this.hy;
-    for (let i = 0; i < oL.length; i++) {
-      this.p += (this.t - this.p) * this.k;
+    if (!this.l || !this.pts.length || (this.gt === 0 && this.g < 1e-4)) { oL.fill(0); oR.fill(0); this.g = 0; return true; }
+    const L = this.l, R = this.r, n = this.len, s = 1 / 32768, hx = this.hx, hy = this.hy, lp = this.lp;
+    const N = oL.length, t0 = currentTime - SCRATCH_DELAY, dt = 1 / sampleRate;
+    // Tiefpass passend zur Geschwindigkeit: schnell gescratcht = sonst metallisches Aliasing
+    const pStart = this.p;
+    const fc = Math.min(20000, Math.max(300, 18000 / Math.max(1, this.speed)));
+    const a = 1 - Math.exp(-2 * Math.PI * fc / sampleRate);
+    for (let i = 0; i < N; i++) {
+      this.p += (this.targetAt(t0 + i * dt) - this.p) * this.ks;
       this.g += (this.gt - this.g) * 0.004;
       const p = this.p;
-      let a = 0, b = 0;
+      let x = 0, y = 0;
       if (p >= 0 && p < n - 1) {
         const j = p | 0, f = p - j;
-        a = (L[j] + (L[j + 1] - L[j]) * f) * s;
-        b = (R[j] + (R[j + 1] - R[j]) * f) * s;
+        x = (L[j] + (L[j + 1] - L[j]) * f) * s;
+        y = (R[j] + (R[j + 1] - R[j]) * f) * s;
       }
+      lp[0] += (x - lp[0]) * a; lp[1] += (lp[0] - lp[1]) * a;
+      lp[2] += (y - lp[2]) * a; lp[3] += (lp[2] - lp[3]) * a;
+      x = lp[1]; y = lp[3];
       // Hochpass ~10 Hz: Stillstand der Platte = Stille statt Gleichspannung
-      const ya = a - hx[0] + 0.9987 * hy[0]; hx[0] = a; hy[0] = ya;
-      const yb = b - hx[1] + 0.9987 * hy[1]; hx[1] = b; hy[1] = yb;
+      const ya = x - hx[0] + 0.9987 * hy[0]; hx[0] = x; hy[0] = ya;
+      const yb = y - hx[1] + 0.9987 * hy[1]; hx[1] = y; hy[1] = yb;
       oL[i] = ya * this.g;
       oR[i] = yb * this.g;
     }
+    this.speed = Math.abs(this.p - pStart) / N;
     return true;
   }
 }
@@ -1034,13 +1071,31 @@ class Deck {
     this.cuePreview = false;
     this.pause();
     this.scratching = true;
-    this.scratchNode.port.postMessage({ type: 'start', pos: this.offset });
+    // Uhr-Abgleich: Zeitstempel der Touch-Events (performance.now) → Audio-Zeit
+    this.scratchClock = ctx.currentTime - performance.now() / 1000;
+    this.scratchLastEvent = performance.now();
+    this.scratchNode.port.postMessage({ type: 'start', pos: this.offset, time: ctx.currentTime });
   }
 
-  scratchTo(pos) {
+  // samples: [[Zeitstempel (ms, performance.now), Position (s)], …] – jede Fingerposition mit ihrer Zeit
+  scratchTo(samples) {
+    if (!this.scratching || !samples.length) return;
+    const now = performance.now();
+    const pts = samples.map(([ts, pos]) => {
+      // ältere Browser liefern Event-Zeit in einer anderen Uhr → dann "jetzt" nehmen
+      if (!(Math.abs(ts - now) < 1000)) ts = now;
+      this.offset = clamp(pos, 0, this.duration - 0.001);
+      return [ts / 1000 + this.scratchClock, this.offset];
+    });
+    this.scratchLastEvent = samples[samples.length - 1][0];
+    this.scratchNode.port.postMessage({ type: 'move', pts });
+  }
+
+  // Liegt der Finger still, kommen keine Events – dann regelmäßig "steht" melden
+  scratchHeartbeat() {
     if (!this.scratching) return;
-    this.offset = clamp(pos, 0, this.duration - 0.001);
-    this.scratchNode.port.postMessage({ type: 'target', pos: this.offset });
+    const now = performance.now();
+    if (now - this.scratchLastEvent > 40) this.scratchTo([[now, this.offset]]);
   }
 
   endScratch() {
@@ -1296,9 +1351,11 @@ class Deck {
       if (pinch && touches.size >= 2) {
         this.zoomSpan = clamp(pinch.span * pinch.dist / pinchDist(), 1.5, 40);
       } else if (drag && drag.vinyl) {
-        // Finger nach rechts zieht die Platte zurück, nach links schiebt sie vor
+        // Finger nach rechts zieht die Platte zurück, nach links schiebt sie vor.
+        // Alle Zwischenpositionen seit dem letzten Event mitnehmen (wo der Browser sie liefert).
         const secPerPx = this.zoomSpan / this.zoomW / uiScale;
-        this.scratchTo(drag.startPos - (e.clientX - drag.startX) * secPerPx);
+        const evs = (e.getCoalescedEvents && e.getCoalescedEvents().length) ? e.getCoalescedEvents() : [e];
+        this.scratchTo(evs.map(ev => [ev.timeStamp, drag.startPos - (ev.clientX - drag.startX) * secPerPx]));
       } else if (drag) {
         if (drag.wasPlaying) {
           this.setNudge(1 - clamp((e.clientX - drag.startX) / 300, -0.3, 0.3));
@@ -1496,6 +1553,7 @@ class Deck {
   }
 
   render() {
+    this.scratchHeartbeat();
     this.drawZoom();
     this.drawOverview();
     const el = this.el;

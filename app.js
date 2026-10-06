@@ -19,6 +19,7 @@ const EQ_HIGH_X = 2500;                 // Trennfrequenz Mitten/Höhen (Hz)
 const ECHO_MAX_DELAY = 8;               // s (1 Takt bei 30 BPM)
 const ECHO_FEEDBACK = 0.5;              // jede Wiederholung -6 dB
 const ECHO_WET = 0.9;
+const END_WARN_S = 30;                  // letzte Sekunden eines Songs: Wellenform pulsiert im Takt
 const ECHO_LEN_MIN = 1;                 // Ausklingzeit (s), einstellbar per Fader
 const ECHO_LEN_MAX = 5;
 const ECHO_LEN_DEFAULT = 3;
@@ -1572,9 +1573,43 @@ class Deck {
     marker(this.cuePoint, '#ffd23f', '');
     this.hotcues.forEach((t, i) => { if (t != null) marker(t, HOTCUE_COLORS[i], String(i + 1)); });
 
+    // Endwarnung: rotes Aufblitzen auf der "1" jedes Takts
+    const pulse = this.endPulse();
+    if (pulse > 0) {
+      c.fillStyle = `rgba(255, 61, 90, ${(0.34 * pulse).toFixed(3)})`;
+      c.fillRect(0, 0, W, H);
+      c.strokeStyle = `rgba(255, 61, 90, ${(0.9 * pulse).toFixed(3)})`;
+      c.lineWidth = 3;
+      c.strokeRect(1.5, 1.5, W - 3, H - 3);
+    }
+
     // Abspielkopf
     c.fillStyle = '#fff';
     c.fillRect(Math.round(W / 2) - 1, 0, 2, H);
+  }
+
+  // Sekunden (Echtzeit) bis zum hörbaren Ende des Songs
+  remainingReal() {
+    if (!this.wave) return Infinity;
+    return (this.wave.soundEnd - this.position) / this.rate;
+  }
+
+  // 0…1: Stärke des Endwarnungs-Pulses in diesem Moment (nur beim Abspielen, letzte 30 s).
+  // Pulst auf der "1" jedes Takts (Beatgrid), ohne BPM alle 2 s; klingt über einen Beat ab.
+  endPulse() {
+    if (!this.playing || this.loop) return 0;
+    const rem = this.remainingReal();
+    if (!(rem > 0 && rem <= END_WARN_S)) return 0;
+    let q;
+    if (this.bpm) {
+      const beat = 60 / this.bpm;
+      q = mod((this.position - this.firstBeat) / beat, 4);   // 0 = "1" des Takts
+    } else {
+      q = mod(this.position, 2) * 2;
+    }
+    if (q >= 1) return 0;
+    const strength = rem <= 10 ? 1 : 0.75;                  // letzte 10 s etwas kräftiger
+    return strength * (1 - q) * (1 - q);
   }
 
   drawOverview() {
@@ -1601,6 +1636,11 @@ class Deck {
       c.fillStyle = HOTCUE_COLORS[i];
       c.fillRect(xOf(t) - 1, 0, 3, 6);
     });
+    const pulse = this.endPulse();
+    if (pulse > 0) {
+      c.fillStyle = `rgba(255, 61, 90, ${(0.3 * pulse).toFixed(3)})`;
+      c.fillRect(px, 0, W - px, H);
+    }
     c.fillStyle = '#fff';
     c.fillRect(px - 1, 0, 2, H);
   }
@@ -1624,6 +1664,7 @@ class Deck {
     const pos = this.position;
     setText(el.time, fmtTime(pos));
     setText(el.remain, '-' + fmtTime(this.duration - pos));
+    el.remain.classList.toggle('ending', this.remainingReal() <= END_WARN_S && this.duration > 0);
     setText(el.bpm, this.bpm ? (this.bpm * this.rate).toFixed(1) : '---.-');
     const pct = (this.rate - 1) * 100;
     setText(el.tempoVal, (pct >= 0 ? '+' : '') + pct.toFixed(2) + '%');
@@ -2236,8 +2277,10 @@ automixBtn.addEventListener('click', () => (automix.on ? stopAutomix() : startAu
 
 // Überblendung mit eigener Kurve: der neue Song wird über die ganze Dauer gleichmäßig
 // lauter, der alte gleichmäßig leiser (Equal Power) – egal wo der Crossfader stand.
-// Der Crossfader-Griff wandert dabei sichtbar mit. Der Bass beider Decks geht
-// langsam auf 50 % (Low-Knopf halb nach links), danach zurück in die Mitte.
+// Der Crossfader-Griff wandert dabei sichtbar mit.
+// Bass-Übergabe: der neue Song startet mit dem Bass auf 50 % (Low-Knopf halb links)
+// und kommt gleichmäßig bis zur Mitte hoch; der alte geht gleichzeitig von seiner
+// Stellung auf 50 % herunter und wird nach der Überblendung wieder auf Mitte gesetzt.
 const AUTOMIX_BASS = -0.5;
 const BASS_RESTORE_S = 0.8;
 
@@ -2246,10 +2289,11 @@ function startFade(from, to, dur) {
   const now = ctx.currentTime;
   to.xf.gain.cancelScheduledValues(now);
   to.xf.gain.setValueAtTime(0, now);           // neuer Song startet wirklich leise
+  to.knobs.low.setValue(AUTOMIX_BASS, true);   // … und mit halbem Bass
   to.play();
   automix.fade = {
     from, to, start: now, dur, x0: xfader.getValue(), x1: xfSide(to), manual: false,
-    bass0: { from: from.knobs.low.getValue(), to: to.knobs.low.getValue() },
+    bassFrom0: from.knobs.low.getValue(),
   };
 }
 
@@ -2266,9 +2310,8 @@ function finishFadeVolumes(f, completed) {
 }
 
 function fadeBass(f, t) {
-  for (const [d, v0] of [[f.from, f.bass0.from], [f.to, f.bass0.to]]) {
-    d.knobs.low.setValue(v0 + (AUTOMIX_BASS - v0) * t, true);
-  }
+  f.from.knobs.low.setValue(f.bassFrom0 + (AUTOMIX_BASS - f.bassFrom0) * t, true);   // alt: runter auf 50 %
+  f.to.knobs.low.setValue(AUTOMIX_BASS * (1 - t), true);                                 // neu: 50 % → Mitte
 }
 
 // Bass nach der Überblendung sanft zurück in die Mitte

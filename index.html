@@ -54,6 +54,29 @@
       <section class="deck deck-b" id="deckB"></section>
     </main>
 
+    <!-- Playlist: fährt von rechts herein, Lasche unten rechts -->
+    <aside class="playlist" id="playlist" aria-label="Playlist">
+      <button class="pl-tab" id="plTab" aria-expanded="false" aria-controls="playlist">
+        <span class="pl-tab-text">Playlist</span>
+        <span class="pl-tab-count" id="plTabCount">0</span>
+      </button>
+      <div class="pl-head">
+        <div class="pl-title">Playlist <span class="pl-count" id="plCount"></span></div>
+        <button class="btn automix" id="automixBtn" title="Songs nacheinander mit Überblendung abspielen">Automix</button>
+      </div>
+      <div class="pl-add">
+        <label class="btn small pl-add-btn">+ Songs hinzufügen<input type="file" id="plFiles" accept="audio/*,.mp3,.m4a,.wav,.aac,.flac" multiple hidden></label>
+        <span class="pl-hint">Tippen = laden · halten &amp; ziehen = sortieren</span>
+      </div>
+      <div class="pl-list" id="plList"></div>
+      <div class="pl-settings">
+        <div class="group-label">Automix · Fade-Dauer <span class="pl-fade-val" id="plFadeVal"></span></div>
+        <div id="plFadeSlot"></div>
+      </div>
+    </aside>
+
+    <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
     <footer class="help">
       <span>Regler: nach links/rechts ziehen</span>
       <span>Doppeltipp = zurücksetzen</span>

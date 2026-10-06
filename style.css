@@ -21,6 +21,7 @@
   --ok: #2bd96b;
   --on-accent: #0b0d12;
   --accent: #c9a7ff;
+  --pl: #c9a7ff;          /* Playlist/Automix */
 
   --font-body: "Barlow", "Segoe UI", system-ui, -apple-system, Roboto, sans-serif;
   --font-cond: "Barlow Condensed", "Arial Narrow", "Segoe UI", system-ui, sans-serif;
@@ -50,6 +51,8 @@ body {
 }
 
 .app {
+  position: relative;
+  overflow: hidden;          /* Playlist fährt von rechts herein */
   max-width: 1560px;
   margin: 0 auto;
   padding: max(14px, env(safe-area-inset-top, 0px)) max(16px, env(safe-area-inset-right, 0px)) max(16px, env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px));
@@ -373,6 +376,120 @@ html[data-layout="flow"] .meter.h { width: 90px; }
 html[data-layout="flow"] .topbar { grid-template-columns: minmax(0, 1fr) auto; }
 html[data-layout="flow"] .mode-switch { grid-column: 1 / -1; justify-self: center; order: 3; }
 
+
+/* ---------- Playlist (fährt von rechts herein) ---------- */
+.playlist {
+  --accent: var(--pl);
+  position: absolute; top: 10px; bottom: 12px; right: 0; z-index: 20;
+  width: 360px; max-width: calc(100% - 40px);
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 14px 14px 14px 16px;
+  background: var(--panel); border: 1px solid var(--line); border-right: 0;
+  border-radius: 16px 0 0 16px;
+  box-shadow: -18px 0 40px rgba(0, 0, 0, .55);
+  transform: translateX(100%);
+  transition: transform .28s cubic-bezier(.2, .8, .2, 1), box-shadow .28s;
+}
+.playlist:not(.open) { box-shadow: none; }
+.playlist.open { transform: none; }
+.playlist.dragover { outline: 2px dashed var(--accent); outline-offset: -6px; }
+
+/* Lasche unten rechts – sitzt links am Panel und bleibt sichtbar, wenn es zu ist */
+.pl-tab {
+  position: absolute; right: 100%; bottom: 18px;
+  width: 30px; padding: 12px 0;
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+  background: var(--pl); color: var(--on-accent);
+  border: 0; border-radius: 10px 0 0 10px;
+  font: 700 13px/1 var(--font-cond); letter-spacing: 2px; text-transform: uppercase;
+  cursor: pointer; touch-action: manipulation;
+  box-shadow: -4px 0 14px rgba(0, 0, 0, .4);
+}
+.pl-tab-text { writing-mode: vertical-rl; transform: rotate(180deg); }
+.pl-tab-count {
+  min-width: 20px; padding: 3px 4px; border-radius: 10px;
+  background: var(--on-accent); color: var(--pl); font-size: 12px; letter-spacing: 0;
+}
+.pl-tab:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }
+
+.pl-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.pl-title { font: 700 22px var(--font-cond); letter-spacing: .5px; }
+.pl-count { font-size: 14px; font-weight: 500; color: var(--muted); margin-left: 4px; }
+.btn.automix { min-width: 130px; }
+.btn.automix.on { animation: none; }
+
+.pl-add { display: flex; flex-direction: column; gap: 6px; }
+.pl-add-btn { width: 100%; }
+.pl-hint { color: var(--muted); font-size: 12px; text-align: center; }
+
+.pl-list {
+  flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
+  touch-action: none;     /* Wischen, Halten und Ziehen macht die App selbst */
+  display: flex; flex-direction: column; gap: 6px;
+  margin: 0 -6px; padding: 4px 6px;
+  scrollbar-width: thin;
+}
+.pl-empty { margin: auto; text-align: center; color: var(--muted); line-height: 1.6; padding: 24px 8px; }
+.pl-empty small { font-size: 13px; }
+
+.pl-item {
+  position: relative; flex: none;
+  display: grid; grid-template-columns: 28px minmax(0, 1fr) 40px; align-items: center; gap: 8px;
+  min-height: 58px; padding: 6px 4px 6px 8px;
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px;
+  cursor: pointer;
+  transition: transform .16s ease, box-shadow .16s, background .12s, border-color .12s;
+}
+.pl-item:active { background: var(--raised); }
+.pl-num { color: var(--muted); font: 600 15px var(--font-cond); text-align: center; font-variant-numeric: tabular-nums; }
+.pl-name { font-weight: 600; font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pl-meta { display: flex; gap: 10px; color: var(--muted); font: 500 13px var(--font-cond); font-variant-numeric: tabular-nums; margin-top: 2px; }
+.pl-state { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pl-del {
+  width: 40px; height: 40px; border: 0; border-radius: 8px; background: transparent;
+  color: var(--muted); font-size: 22px; line-height: 1; cursor: pointer; touch-action: manipulation;
+}
+.pl-del:active { background: var(--raised); color: var(--rec); }
+
+.pl-item.in-a { border-color: color-mix(in srgb, var(--a) 60%, var(--line)); }
+.pl-item.in-b { border-color: color-mix(in srgb, var(--b) 60%, var(--line)); }
+.pl-item.in-a .pl-state { color: var(--a); }
+.pl-item.in-b .pl-state { color: var(--b); }
+.pl-item.playing.in-a { background: color-mix(in srgb, var(--a) 16%, var(--panel-2)); }
+.pl-item.playing.in-b { background: color-mix(in srgb, var(--b) 16%, var(--panel-2)); }
+.pl-item.next .pl-state { color: var(--pl); }
+.pl-item.next { border-style: dashed; border-color: color-mix(in srgb, var(--pl) 60%, var(--line)); }
+
+/* Umsortieren: gehaltener Eintrag wird etwas größer und schwebt */
+.pl-list.sorting .pl-item:not(.dragging) { transition: transform .16s ease; }
+.pl-item.dragging {
+  z-index: 2; transition: none; cursor: grabbing;
+  background: var(--raised); border-color: var(--pl);
+  box-shadow: 0 10px 26px rgba(0, 0, 0, .6), 0 0 0 1px var(--pl);
+}
+
+.pl-settings { border-top: 1px solid var(--line); padding-top: 10px; display: flex; flex-direction: column; gap: 4px; }
+.pl-fade-val { color: var(--text); font-variant-numeric: tabular-nums; letter-spacing: .5px; }
+
+/* Hinweis für 1 s (z. B. beide Decks laufen) */
+.toast {
+  position: absolute; left: 50%; top: 42%; z-index: 40;
+  transform: translate(-50%, -50%) scale(.96); opacity: 0;
+  max-width: min(520px, 80%); padding: 16px 22px;
+  background: var(--panel); color: var(--text); text-align: center;
+  font: 600 18px/1.35 var(--font-body);
+  border: 1px solid var(--rec); border-radius: 14px;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, .6), 0 0 0 4px color-mix(in srgb, var(--rec) 18%, transparent);
+  pointer-events: none;
+  transition: opacity .15s, transform .15s;
+}
+.toast.show { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+
+/* Handy (scrollende Seite): Playlist am Bildschirm festmachen */
+html[data-layout="flow"] .playlist { position: fixed; top: 0; bottom: 0; border-radius: 0; }
+html[data-layout="flow"] .toast { position: fixed; }
+
 @media (prefers-reduced-motion: reduce) {
+  .playlist, .pl-item, .toast { transition: none; }
   .logo-mark, .btn.rec.on .rec-dot, .btn.echo.on, .btn.hotcue.deleted { animation: none; }
 }

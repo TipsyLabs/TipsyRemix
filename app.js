@@ -382,10 +382,15 @@ function analyze(buffer) {
     if (mx > maxAmp) maxAmp = mx;
   }
   if (maxAmp > 0) for (let b = 0; b < n; b++) amp[b] /= maxAmp;
+  // Hörbarer Bereich (ohne Stille am Anfang/Ende, Schwelle -40 dB unter der Spitze) – für Automix
+  let sb = 0, eb = n - 1;
+  while (sb < n - 1 && amp[sb] < 0.01) sb++;
+  while (eb > sb && amp[eb] < 0.01) eb--;
+  const soundStart = sb / RES, soundEnd = Math.min(len / sr, (eb + 1) / RES);
 
   const rms = Math.sqrt(total / Math.max(1, len));
   const { bpm, firstBeat } = detectBpm(lowE, RES);
-  return { amp, lowQ, rms, bpm, firstBeat };
+  return { amp, lowQ, rms, bpm, firstBeat, soundStart, soundEnd };
 }
 
 function detectBpm(lowE, fr) {
@@ -813,6 +818,8 @@ class Deck {
     this.firstBeat = 0;
     this.syncArmed = false;
     this.keyLock = false;
+    this.loading = false;
+    this.playlistId = null;          // geladener Playlist-Eintrag (oder null)
     this.scratchNode = null;
     this.scratching = false;
     this.scratchWasPlaying = false;
@@ -1204,8 +1211,12 @@ class Deck {
 
   /* ---- Laden ---- */
 
-  async load(file) {
+  // opts.playlistId: aus welchem Playlist-Eintrag (für Markierung/Automix), sonst null
+  async load(file, opts = {}) {
     this.pause();
+    this.loading = true;
+    this.playlistId = opts.playlistId ?? null;
+    if (typeof onDeckChange === 'function') onDeckChange();
     setText(this.el.title, `Lade „${file.name}“ …`);
     this.el.hint.style.display = 'none';
     try {
@@ -1237,10 +1248,15 @@ class Deck {
       this.renderOverviewCache();
       this.updateHotcueButtons();
       this.updateLoopButtons();
+      return true;
     } catch (err) {
       console.error(err);
       setText(this.el.title, 'Fehler: Datei konnte nicht gelesen werden');
       if (!this.buffer) this.el.hint.style.display = '';
+      return false;
+    } finally {
+      this.loading = false;
+      if (typeof onDeckChange === 'function') onDeckChange();
     }
   }
 
@@ -1965,9 +1981,442 @@ function frame() {
   masterLevel = Math.max(peakLevel(masterAnalyser, masterBuf), masterLevel - 0.02);
   masterMeterCover.style.width = (1 - masterLevel) * 100 + '%';
   if (recorder) setText(recTime, fmtTime((performance.now() - recStart) / 1000).slice(0, -2));
+  playlistTick();
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
+
+/* ---------------- Playlist & Automix ----------------
+   Seitliche Playlist (Lasche unten rechts). Tippen lädt einen Song ins freie
+   Deck; laufen beide Decks, wird nichts geladen und kurz ein Hinweis gezeigt.
+   Halten (bis der Eintrag größer wird) und ziehen sortiert um.
+   Automix: lädt den ersten Song ins freie Deck und blendet jeweils am Ende
+   des laufenden Songs mit dem Crossfader zum nächsten über – in Playlist-
+   Reihenfolge, nach dem letzten wieder von vorn. */
+
+const PL_LONGPRESS_MS = 450;
+const PL_MOVE_TOLERANCE = 8;          // px, bis ein Tippen als Wischen gilt
+const FADE_MIN = 3, FADE_MAX = 10, FADE_DEFAULT = 6;
+const MSG_BOTH_PLAYING = 'Beide Decks spielen – stoppe zuerst ein Deck.';
+
+const playlist = [];                  // { id, file, name, duration }
+let plNextId = 1;
+const plEl = document.getElementById('playlist');
+const plTab = document.getElementById('plTab');
+const plList = document.getElementById('plList');
+const plTabCount = document.getElementById('plTabCount');
+const plCount = document.getElementById('plCount');
+const automixBtn = document.getElementById('automixBtn');
+const toastEl = document.getElementById('toast');
+
+const automix = {
+  on: false,
+  lastId: null,        // zuletzt aus der Playlist geladener Eintrag → danach geht es weiter
+  fallback: 0,         // Position, falls dieser Eintrag gelöscht wurde
+  fade: null,          // laufende Überblendung { from, to, start, dur, x0, x1 }
+  busy: false,         // lädt gerade
+  fadeLen: FADE_DEFAULT,
+};
+try {
+  const f = parseFloat(localStorage.getItem('tipsyremix.fadeLen'));
+  if (f >= FADE_MIN && f <= FADE_MAX) automix.fadeLen = f;
+} catch (_) { /* egal */ }
+
+function showToast(msg, ms = 1000) {
+  toastEl.textContent = msg;
+  toastEl.hidden = false;
+  toastEl.classList.add('show');
+  clearTimeout(showToast.timer);
+  showToast.timer = setTimeout(() => {
+    toastEl.classList.remove('show');
+    toastEl.hidden = true;
+  }, ms);
+}
+
+const isAudioFile = f => (f.type || '').startsWith('audio/') || /\.(mp3|wav|ogg|oga|flac|m4a|aac|opus|webm)$/i.test(f.name);
+const fmtDur = s => (s == null ? '–:––' : `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`);
+
+/* ---- Songs hinzufügen ---- */
+
+const durationQueue = [];
+function addFiles(files) {
+  const list = [...files].filter(isAudioFile);
+  for (const file of list) {
+    const item = { id: plNextId++, file, name: file.name.replace(/\.[^.]+$/, ''), duration: null };
+    playlist.push(item);
+    durationQueue.push(item);
+  }
+  if (list.length) {
+    renderPlaylist();
+    readNextDuration();
+  }
+}
+
+// Länge nur aus den Metadaten lesen (schnell, ohne den Song zu dekodieren) – einer nach dem anderen
+let readingDuration = false;
+function readNextDuration() {
+  if (readingDuration || !durationQueue.length) return;
+  readingDuration = true;
+  const item = durationQueue.shift();
+  const url = URL.createObjectURL(item.file);
+  const a = new Audio();
+  a.preload = 'metadata';
+  const done = () => {
+    URL.revokeObjectURL(url);
+    readingDuration = false;
+    renderPlaylist();
+    readNextDuration();
+  };
+  a.onloadedmetadata = () => { if (isFinite(a.duration)) item.duration = a.duration; done(); };
+  a.onerror = done;
+  a.src = url;
+}
+
+document.getElementById('plFiles').addEventListener('change', e => {
+  addFiles(e.target.files);
+  e.target.value = '';
+});
+plEl.addEventListener('dragover', e => { e.preventDefault(); plEl.classList.add('dragover'); });
+plEl.addEventListener('dragleave', e => { if (!plEl.contains(e.relatedTarget)) plEl.classList.remove('dragover'); });
+plEl.addEventListener('drop', e => {
+  e.preventDefault();
+  plEl.classList.remove('dragover');
+  addFiles(e.dataTransfer.files);
+});
+
+/* ---- Ein-/Ausfahren ---- */
+
+function setPlaylistOpen(open) {
+  plEl.classList.toggle('open', open);
+  plTab.setAttribute('aria-expanded', String(open));
+}
+plTab.addEventListener('click', () => setPlaylistOpen(!plEl.classList.contains('open')));
+
+/* ---- Laden ins freie Deck ---- */
+
+function idleDeck() {
+  const free = decks.filter(d => !d.playing && !d.scratching && !d.loading);
+  if (!free.length) return null;
+  if (free.length === 1) return free[0];
+  return free.find(d => !d.buffer) || free[0];
+}
+
+function loadItem(item, deck) {
+  automix.lastId = item.id;
+  return deck.load(item.file, { playlistId: item.id });
+}
+
+function tapItem(item) {
+  if (decks.every(d => d.playing || d.scratching)) { showToast(MSG_BOTH_PLAYING); return; }
+  const d = idleDeck();
+  if (!d) { showToast('Ein Deck lädt gerade – einen Moment.'); return; }
+  loadItem(item, d);
+}
+
+function removeItem(id) {
+  const i = playlist.findIndex(it => it.id === id);
+  if (i < 0) return;
+  if (automix.lastId === id) { automix.lastId = null; automix.fallback = i; }
+  playlist.splice(i, 1);
+  renderPlaylist();
+}
+
+/* ---- Automix ---- */
+
+function nextItem() {
+  if (!playlist.length) return null;
+  const i = playlist.findIndex(it => it.id === automix.lastId);
+  return i >= 0 ? playlist[(i + 1) % playlist.length] : playlist[automix.fallback % playlist.length];
+}
+
+// lädt den nächsten Song; ist einer defekt, wird der folgende versucht
+async function loadNextInto(deck) {
+  for (let tries = 0; tries < playlist.length; tries++) {
+    const item = nextItem();
+    if (!item) return false;
+    if (await loadItem(item, deck)) return true;
+  }
+  return false;
+}
+
+const xfSide = d => (d === deckA ? 0 : 1);
+
+async function startAutomix() {
+  if (!playlist.length) { showToast('Füge zuerst Songs zur Playlist hinzu.', 1500); return; }
+  const playing = decks.filter(d => d.playing || d.scratching);
+  if (playing.length === 2) { showToast(MSG_BOTH_PLAYING); return; }
+  if (decks.some(d => d.loading)) { showToast('Ein Deck lädt gerade – einen Moment.'); return; }
+  automix.on = true;
+  automix.fade = null;
+  automix.lastId = null;           // Automix beginnt mit dem ersten Song der Playlist
+  automix.fallback = 0;
+  updateAutomixButton();
+  automix.busy = true;
+  try {
+    if (playing.length === 1) {
+      await loadNextInto(playing[0].other);
+    } else {
+      const first = idleDeck() || deckA;
+      if (!(await loadNextInto(first)) || !automix.on) return;
+      first.seek(first.wave.soundStart || 0);
+      first.play();
+      xfader.setValue(xfSide(first), true);
+      await loadNextInto(first.other);
+    }
+  } finally {
+    automix.busy = false;
+  }
+}
+
+function stopAutomix() {
+  automix.on = false;
+  automix.fade = null;
+  updateAutomixButton();
+}
+
+function updateAutomixButton() {
+  automixBtn.classList.toggle('on', automix.on);
+  automixBtn.textContent = automix.on ? 'Automix an' : 'Automix';
+  automixBtn.setAttribute('aria-pressed', String(automix.on));
+}
+automixBtn.addEventListener('click', () => (automix.on ? stopAutomix() : startAutomix()));
+
+function startFade(from, to, dur) {
+  to.seek(to.wave ? to.wave.soundStart : 0);
+  to.play();
+  automix.fade = { from, to, start: ctx.currentTime, dur, x0: xfader.getValue(), x1: xfSide(to) };
+}
+
+function loadIntoFreed(deck) {
+  automix.busy = true;
+  loadNextInto(deck).finally(() => { automix.busy = false; });
+}
+
+function automixTick() {
+  if (!automix.on) return;
+  const f = automix.fade;
+  if (f) {
+    if (!f.to.playing) { automix.fade = null; return; }      // Ziel-Deck von Hand gestoppt
+    const t = clamp((ctx.currentTime - f.start) / f.dur, 0, 1);
+    xfader.setValue(f.x0 + (f.x1 - f.x0) * t, true);
+    if (t >= 1) {
+      f.from.pause();
+      automix.fade = null;
+      loadIntoFreed(f.from);
+    }
+    return;
+  }
+  if (automix.busy) return;
+  const playing = decks.filter(d => d.playing);
+  if (playing.length === 1) {
+    const P = playing[0], O = P.other;
+    if (!O.buffer || O.loading || O.scratching || O.playing || P.loop) return;
+    const end = P.wave ? P.wave.soundEnd : P.duration;
+    const remain = (end - P.position) / P.rate;
+    if (remain <= automix.fadeLen) startFade(P, O, Math.max(0.3, remain));
+  } else if (playing.length === 0) {
+    // Song lief ganz aus (z. B. kürzer als die Überblendung) → nächsten direkt starten
+    const ended = decks.find(d => d.buffer && !d.scratching && d.offset >= d.duration - 0.05);
+    const O = ended && ended.other;
+    if (O && O.buffer && !O.loading && !O.scratching) {
+      O.seek(O.wave ? O.wave.soundStart : 0);
+      O.play();
+      xfader.setValue(xfSide(O), true);
+      loadIntoFreed(ended);
+    }
+  }
+}
+
+/* ---- Fade-Dauer ---- */
+
+const plFadeVal = document.getElementById('plFadeVal');
+const showFade = v => setText(plFadeVal, v.toFixed(1).replace('.0', '') + ' s');
+document.getElementById('plFadeSlot').append(createFader({
+  orient: 'h', min: FADE_MIN, max: FADE_MAX, value: automix.fadeLen, def: FADE_DEFAULT,
+  onInput: v => {
+    automix.fadeLen = Math.round(v * 2) / 2;
+    showFade(automix.fadeLen);
+    try { localStorage.setItem('tipsyremix.fadeLen', String(automix.fadeLen)); } catch (_) { /* egal */ }
+  },
+}));
+showFade(automix.fadeLen);
+
+/* ---- Liste zeichnen ---- */
+
+let plDrag = null;   // laufendes Umsortieren
+
+function renderPlaylist() {
+  if (plDrag) return;
+  plList.textContent = '';
+  if (!playlist.length) {
+    const empty = document.createElement('div');
+    empty.className = 'pl-empty';
+    empty.innerHTML = 'Noch keine Songs.<br><small>Tippe auf „+ Songs hinzufügen“ oder zieh Dateien hierher.</small>';
+    plList.append(empty);
+  }
+  playlist.forEach((it, i) => {
+    const row = document.createElement('div');
+    row.className = 'pl-item';
+    row.dataset.id = it.id;
+    row.innerHTML = `<span class="pl-num">${i + 1}</span>
+      <div class="pl-info"><div class="pl-name"></div><div class="pl-meta"><span class="pl-dur"></span><span class="pl-state"></span></div></div>
+      <button class="pl-del" aria-label="Aus der Playlist entfernen">×</button>`;
+    row.querySelector('.pl-name').textContent = it.name;
+    row.querySelector('.pl-dur').textContent = fmtDur(it.duration);
+    plList.append(row);
+  });
+  const n = playlist.length;
+  setText(plTabCount, String(n));
+  setText(plCount, n ? `${n} ${n === 1 ? 'Song' : 'Songs'}` : '');
+  plStatusSig = '';
+  updatePlaylistStatus();
+}
+
+// Markierungen (läuft auf A/B, geladen, als Nächstes) – nur neu setzen, wenn sich etwas ändert
+let plStatusSig = '';
+function updatePlaylistStatus() {
+  const nx = automix.on ? nextItem() : null;
+  const sig = decks.map(d => `${d.playlistId}:${d.playing}:${d.loading}`).join('|') + `|${nx && nx.id}|${automix.on}`;
+  if (sig === plStatusSig) return;
+  plStatusSig = sig;
+  for (const row of plList.querySelectorAll('.pl-item')) {
+    const id = Number(row.dataset.id);
+    const d = decks.find(x => x.playlistId === id);
+    row.classList.toggle('in-a', !!d && d === deckA);
+    row.classList.toggle('in-b', !!d && d === deckB);
+    row.classList.toggle('playing', !!d && d.playing);
+    row.classList.toggle('next', !!nx && nx.id === id && !d);
+    let state = '';
+    if (d) state = d.loading ? `lädt in Deck ${d.id} …` : d.playing ? `▶ läuft auf Deck ${d.id}` : `geladen in Deck ${d.id}`;
+    else if (nx && nx.id === id) state = 'als Nächstes';
+    setText(row.querySelector('.pl-state'), state);
+  }
+}
+
+function onDeckChange() { updatePlaylistStatus(); }
+
+function playlistTick() {
+  automixTick();
+  updatePlaylistStatus();
+}
+
+/* ---- Tippen, Wischen, Halten & Ziehen ----
+   Eigene Behandlung statt Browser-Scrollen, damit langes Drücken + Ziehen
+   auf dem iPad zuverlässig funktioniert. */
+
+let plGesture = null;
+
+plList.addEventListener('click', e => {
+  const del = e.target.closest('.pl-del');
+  if (!del) return;
+  removeItem(Number(del.closest('.pl-item').dataset.id));
+});
+
+plList.addEventListener('pointerdown', e => {
+  if (e.target.closest('.pl-del')) return;
+  if (e.pointerType === 'mouse' && e.button !== 0) return;
+  if (plGesture) return;
+  const row = e.target.closest('.pl-item');
+  plList.setPointerCapture(e.pointerId);
+  const g = plGesture = {
+    id: e.pointerId, row, x0: e.clientX, y0: e.clientY, lastY: e.clientY, lastT: performance.now(),
+    scroll0: plList.scrollTop, mode: 'pending', vel: 0, timer: null,
+  };
+  if (row) g.timer = setTimeout(() => { if (plGesture === g && g.mode === 'pending') beginDrag(g); }, PL_LONGPRESS_MS);
+});
+
+plList.addEventListener('pointermove', e => {
+  const g = plGesture;
+  if (!g || e.pointerId !== g.id) return;
+  const dx = e.clientX - g.x0, dy = e.clientY - g.y0;
+  if (g.mode === 'pending' && Math.hypot(dx, dy) > PL_MOVE_TOLERANCE) {
+    g.mode = 'scroll';
+    clearTimeout(g.timer);
+  }
+  if (g.mode === 'scroll') {
+    plList.scrollTop = g.scroll0 - dy / uiScale;
+    const now = performance.now();
+    g.vel = (e.clientY - g.lastY) / Math.max(1, now - g.lastT) / uiScale;
+    g.lastY = e.clientY; g.lastT = now;
+  } else if (g.mode === 'drag') {
+    moveDrag(e.clientY);
+  }
+});
+
+function endGesture(e, cancelled) {
+  const g = plGesture;
+  if (!g || e.pointerId !== g.id) return;
+  clearTimeout(g.timer);
+  plGesture = null;
+  if (g.mode === 'pending' && g.row && !cancelled) {
+    const item = playlist.find(it => it.id === Number(g.row.dataset.id));
+    if (item) tapItem(item);
+  } else if (g.mode === 'scroll' && !cancelled) {
+    glide(g.vel);
+  } else if (g.mode === 'drag') {
+    endDrag(cancelled);
+  }
+}
+plList.addEventListener('pointerup', e => endGesture(e, false));
+plList.addEventListener('pointercancel', e => endGesture(e, true));
+
+// Nachgleiten nach dem Wischen
+function glide(v) {
+  let vel = -v * 16;
+  const step = () => {
+    if (plGesture || Math.abs(vel) < 0.4) return;
+    plList.scrollTop += vel;
+    vel *= 0.94;
+    requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+}
+
+function beginDrag(g) {
+  g.mode = 'drag';
+  const rows = [...plList.querySelectorAll('.pl-item')];
+  const from = rows.indexOf(g.row);
+  const pitch = rows.length > 1 ? rows[1].offsetTop - rows[0].offsetTop : g.row.offsetHeight;
+  plDrag = { g, rows, from, to: from, pitch, scroll0: plList.scrollTop };
+  g.row.classList.add('dragging');
+  plList.classList.add('sorting');
+  if (navigator.vibrate) navigator.vibrate(15);
+  moveDrag(g.y0);
+}
+
+function moveDrag(clientY) {
+  const d = plDrag;
+  if (!d) return;
+  // am Rand der Liste automatisch weiterscrollen
+  const r = plList.getBoundingClientRect();
+  if (clientY < r.top + 40) plList.scrollTop -= 8;
+  else if (clientY > r.bottom - 40) plList.scrollTop += 8;
+  const dy = (clientY - d.g.y0) / uiScale + (plList.scrollTop - d.scroll0);
+  d.to = clamp(d.from + Math.round(dy / d.pitch), 0, d.rows.length - 1);
+  d.g.row.style.transform = `translateY(${dy}px) scale(1.04)`;
+  d.rows.forEach((row, i) => {
+    if (row === d.g.row) return;
+    let shift = 0;
+    if (d.from < d.to && i > d.from && i <= d.to) shift = -d.pitch;
+    else if (d.to < d.from && i >= d.to && i < d.from) shift = d.pitch;
+    row.style.transform = shift ? `translateY(${shift}px)` : '';
+  });
+}
+
+function endDrag(cancelled) {
+  const d = plDrag;
+  plDrag = null;
+  plList.classList.remove('sorting');
+  if (!d) return;
+  if (!cancelled && d.to !== d.from) {
+    const [item] = playlist.splice(d.from, 1);
+    playlist.splice(d.to, 0, item);
+  }
+  renderPlaylist();
+}
+
+updateAutomixButton();
+renderPlaylist();
 
 /* ---------------- Ein Bildschirm: Konsole passend skalieren ----------------
    Die Konsole wird in einer festen Entwurfsbreite gesetzt (quer 1180 px,

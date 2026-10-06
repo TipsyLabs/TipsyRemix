@@ -11,6 +11,8 @@
 - Echo Out (1 Takt, Ausklingzeit 1–5 s)
 - Kanal-Mute: Finger auf die Fader-Schiene unter den Griff legen (stumm, solange er liegt)
 - Wellenform-Modus SMUDGE (Scrub/Pitch-Bend) oder VINYL (Platte anfassen = Stopp, ziehen = Scratch vor/zurück)
+- Playlist (Lasche unten rechts): mehrere Songs hinzufügen, Tippen lädt ins freie Deck, Halten & Ziehen sortiert
+- Automix: spielt die Playlist der Reihe nach mit Crossfader-Überblendung (3–10 s), danach wieder von vorn
 - Aufnahme des Mixes als MP3 (320 kbps)
 - Alles auf einem Bildschirm: die Konsole skaliert sich automatisch auf iPad quer/hoch
 

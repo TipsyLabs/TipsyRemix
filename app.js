@@ -391,8 +391,58 @@ function analyze(buffer) {
   const soundStart = sb / RES, soundEnd = Math.min(len / sr, (eb + 1) / RES);
 
   const rms = Math.sqrt(total / Math.max(1, len));
-  const { bpm, firstBeat } = detectBpm(lowE, RES);
-  return { amp, lowQ, rms, bpm, firstBeat, soundStart, soundEnd };
+  const det = detectBpm(lowE, RES);
+  const firstBeat = det.bpm ? findDownbeat(det.bpm, det.firstBeat, amp, lowE, soundStart) : det.firstBeat;
+  return { amp, lowQ, rms, bpm: det.bpm, firstBeat, soundStart, soundEnd };
+}
+
+// Takt-"1" bestimmen. detectBpm liefert nur, wo die Beats liegen – nicht, welcher die "1" ist.
+// 1. Wahl: Abschnittswechsel (Bass setzt ein, Refrain, Drop …) beginnen fast immer auf der "1".
+//    Die stärksten Wechsel stimmen ab, auf welcher der 4 Beat-Positionen sie liegen.
+// 2. Wahl (keine klaren Wechsel): der erste Beat, an dem die Musik hörbar beginnt.
+function findDownbeat(bpm, phase, amp, lowE, soundStart) {
+  const beat = 60 / bpm, n = amp.length;
+  const beats = Math.floor((n / RES - phase) / beat);
+  if (beats >= 24) {
+    // Energie je Beat: Bass und Gesamtpegel (log)
+    const E = [];
+    for (let k = 0; k < beats; k++) {
+      const b0 = Math.floor((phase + k * beat) * RES), b1 = Math.min(n, Math.floor((phase + (k + 1) * beat) * RES));
+      let lo = 0, all = 0;
+      for (let b = b0; b < b1; b++) { lo += lowE[b]; all += amp[b] * amp[b]; }
+      E.push([Math.log(1e-9 + lo), Math.log(1e-9 + all)]);
+    }
+    // Wechsel = Unterschied zwischen den 4 Beats davor und danach
+    const d = new Float32Array(beats);
+    // erst 4 Beats nach dem hörbaren Beginn: der Übergang Stille → Musik fällt sonst
+    // auf die Fenstergrenze statt auf den echten Einsatz
+    const kStart = Math.max(4, Math.ceil((soundStart - phase) / beat) + 4);
+    for (let k = kStart; k + 4 <= beats - 8; k++) {
+      let x = 0;
+      for (let ch = 0; ch < 2; ch++) {
+        let pre = 0, post = 0;
+        for (let j = 0; j < 4; j++) { pre += E[k - 4 + j][ch]; post += E[k + j][ch]; }
+        x += Math.abs(post - pre) / 4;
+      }
+      d[k] = x;
+    }
+    const peaks = [];
+    for (let k = 2; k < beats - 2; k++) {
+      if (d[k] > 0 && d[k] === Math.max(d[k - 2], d[k - 1], d[k], d[k + 1], d[k + 2])) peaks.push([d[k], k]);
+    }
+    peaks.sort((a, b) => b[0] - a[0]);
+    const votes = [0, 0, 0, 0];
+    const strong = peaks.length ? peaks.filter(p => p[0] >= Math.max(0.1, 0.2 * peaks[0][0])) : [];   // Rauschen ignorieren
+    strong.slice(0, Math.max(6, Math.round(peaks.length * 0.25))).forEach(([, k], i) => {
+      votes[k % 4] += i < 4 ? 2 : 1;          // die 4 stärksten Wechsel zählen doppelt
+    });
+    const order = [0, 1, 2, 3].sort((a, b) => votes[b] - votes[a]);
+    if (votes[order[0]] >= 3 && votes[order[0]] >= 1.5 * votes[order[1]]) return phase + order[0] * beat;
+  }
+  // Nicht eindeutig: beginnt die Musik erst nach Stille (> ¾ Beat), ist ihr erster Beat die "1",
+  // sonst der erste Beat des Songs. (Ein Auftakt vor der "1" – etwa Gesang – bleibt so richtig.)
+  if (soundStart > phase + 0.75 * beat) return phase + Math.ceil((soundStart - phase) / beat - 0.25) * beat;
+  return phase;
 }
 
 function detectBpm(lowE, fr) {
@@ -837,7 +887,8 @@ class Deck {
 
   get position() {
     if (!this.playing) return this.offset;
-    let p = this.offset + (ctx.currentTime - this.startTime) * this.effRate;
+    // vor einem geplanten Start (playAt) steht die Position noch
+    let p = this.offset + Math.max(0, ctx.currentTime - this.startTime) * this.effRate;
     if (this.loop && p >= this.loop.end) {
       p = this.loop.start + mod(p - this.loop.start, this.loop.end - this.loop.start);
     }
@@ -851,7 +902,8 @@ class Deck {
 
   /* ---- Transport ---- */
 
-  startSource() {
+  // when: Audio-Zeit für einen sample-genauen Start (0 = sofort)
+  startSource(when = 0) {
     const src = ctx.createBufferSource();
     src.buffer = this.buffer;
     src.playbackRate.value = this.effRate;
@@ -867,9 +919,19 @@ class Deck {
       this.playing = false;
       this.offset = this.duration;
     };
-    src.start(0, this.offset);
+    src.start(when, this.offset);
     this.source = src;
-    this.startTime = ctx.currentTime;
+    this.startTime = Math.max(when, ctx.currentTime);
+  }
+
+  // Startet genau zur Audio-Zeit `when` an Position `offset` (für den synchronen Automix-Einstieg)
+  playAt(when, offset) {
+    if (!this.buffer || this.playing) return;
+    if (ctx.state !== 'running') ctx.resume();
+    this.offset = clamp(offset, 0, this.duration - 0.01);
+    this.startSource(when);
+    this.playing = true;
+    this.syncArmed = false;
   }
 
   stopSource() {
@@ -1349,10 +1411,10 @@ class Deck {
 
     this.tempoFader = createFader({
       orient: 'v', min: -1, max: 1, value: 0, def: 0, center: true,
-      onInput: v => { this.syncArmed = false; this.setTempo(v); },
+      onInput: v => { this.syncArmed = false; cancelTempoGlide(this); this.setTempo(v); },
     });
     el.tempoSlot.append(this.tempoFader);
-    el.sync.addEventListener('click', () => this.sync(this.other));
+    el.sync.addEventListener('click', () => { cancelTempoGlide(this); this.sync(this.other); });
     el.range.addEventListener('click', () => this.cycleRange());
     el.keylock.addEventListener('click', () => this.toggleKeyLock());
 
@@ -2283,18 +2345,65 @@ automixBtn.addEventListener('click', () => (automix.on ? stopAutomix() : startAu
 // Stellung auf 50 % herunter und wird nach der Überblendung wieder auf Mitte gesetzt.
 const AUTOMIX_BASS = -0.5;
 const BASS_RESTORE_S = 0.8;
+// Synchroner Einstieg: liegt der neue Song höchstens so weit vom aktuellen Tempo weg,
+// wird sein Tempo angeglichen und er startet mit seiner Takt-"1" genau auf der Takt-"1"
+// des laufenden Songs. Nach der Überblendung gleitet er langsam zurück auf sein Originaltempo.
+const AUTOMIX_SYNC_BPM = 10;
+const TEMPO_GLIDE_S = 15;
 
-function startFade(from, to, dur) {
-  to.seek(to.wave ? to.wave.soundStart : 0);
+// opts.when/offset: synchroner Einstieg zu einem festen Zeitpunkt an einer festen Stelle
+function startFade(from, to, dur, opts = {}) {
   const now = ctx.currentTime;
   to.xf.gain.cancelScheduledValues(now);
   to.xf.gain.setValueAtTime(0, now);           // neuer Song startet wirklich leise
   to.knobs.low.setValue(AUTOMIX_BASS, true);   // … und mit halbem Bass
-  to.play();
+  if (opts.when) {
+    to.playAt(opts.when, opts.offset);
+  } else {
+    to.seek(to.wave ? to.wave.soundStart : 0);
+    to.play();
+  }
   automix.fade = {
-    from, to, start: now, dur, x0: xfader.getValue(), x1: xfSide(to), manual: false,
-    bassFrom0: from.knobs.low.getValue(),
+    from, to, start: opts.when || now, dur, x0: xfader.getValue(), x1: xfSide(to), manual: false,
+    bassFrom0: from.knobs.low.getValue(), synced: !!opts.when,
   };
+}
+
+// Passt der neue Song ins Tempo-Fenster? Dann: Faktor, mit dem er laufen muss
+function syncRate(P, O) {
+  if (!P.bpm || !O.bpm) return null;
+  const target = P.bpm * P.rate;               // Tempo, das gerade zu hören ist
+  return Math.abs(O.bpm - target) <= AUTOMIX_SYNC_BPM ? target / O.bpm : null;
+}
+
+function startSyncedFade(P, O, rate, when, dur) {
+  cancelTempoGlide(P);
+  // Tempo angleichen (Pitch-Bereich bei Bedarf erweitern, wie bei SYNC)
+  const need = Math.abs(rate - 1);
+  if (need > O.tempoRange) O.setTempoRange(TEMPO_RANGES.find(r => r >= need) || TEMPO_RANGES[TEMPO_RANGES.length - 1]);
+  O.setTempo((rate - 1) / O.tempoRange);
+  O.tempoFader.setValue(O.tempoVal);
+  // erster Takt-Anfang ("1") ab dem hörbaren Beginn des neuen Songs
+  const barO = 240 / O.bpm, s0 = O.wave ? O.wave.soundStart : 0;
+  let startBar = O.firstBeat + Math.ceil((s0 - O.firstBeat) / barO - 1e-6) * barO;
+  if (startBar < 0) startBar += barO;
+  startFade(P, O, dur, { when, offset: startBar });
+}
+
+// Tempo nach einem synchronen Einstieg langsam zurück auf 0 % (Originaltempo)
+function tempoGlideTick() {
+  const g = automix.glide;
+  if (!g) return;
+  const t = clamp((ctx.currentTime - g.start) / g.dur, 0, 1);
+  const e = t * t * (3 - 2 * t);               // weich anfangen und enden
+  const v = g.v0 * (1 - e);
+  g.deck.setTempo(v);
+  g.deck.tempoFader.setValue(v);
+  if (t >= 1) automix.glide = null;
+}
+
+function cancelTempoGlide(deck) {
+  if (typeof automix !== 'undefined' && automix.glide && automix.glide.deck === deck) automix.glide = null;
 }
 
 function setFadeGains(f, t) {
@@ -2330,6 +2439,7 @@ function loadIntoFreed(deck) {
 
 function automixTick() {
   bassRestoreTick();
+  tempoGlideTick();
   if (!automix.on) return;
   const f = automix.fade;
   if (f) {
@@ -2346,6 +2456,9 @@ function automixTick() {
       automix.fade = null;
       bassRestore = { start: ctx.currentTime, decks: [[f.to, f.to.knobs.low.getValue()]] };
       f.from.knobs.low.setValue(0, true);                  // gestopptes Deck: gleich in die Mitte
+      if (f.synced && f.to.tempoVal !== 0) {
+        automix.glide = { deck: f.to, v0: f.to.tempoVal, start: ctx.currentTime, dur: TEMPO_GLIDE_S };
+      }
       loadIntoFreed(f.from);
     }
     return;
@@ -2357,6 +2470,19 @@ function automixTick() {
     if (!O.buffer || O.loading || O.scratching || O.playing || P.loop) return;
     const end = P.wave ? P.wave.soundEnd : P.duration;
     const remain = (end - P.position) / P.rate;
+    const rate = syncRate(P, O);
+    if (rate) {
+      // synchron: auf der nächsten Takt-"1" des laufenden Songs einsteigen
+      const barP = 240 / P.bpm;
+      if (remain <= automix.fadeLen + barP / P.rate) {
+        const pos = P.position;
+        let next = P.firstBeat + Math.ceil((pos - P.firstBeat) / barP + 1e-6) * barP;
+        let dt = (next - pos) / P.rate;
+        if (dt < 0.03) { next += barP; dt += barP / P.rate; }   // zu knapp für die Planung → einen Takt später
+        const dur = Math.min(automix.fadeLen, remain - dt);
+        if (dur >= 1) { startSyncedFade(P, O, rate, ctx.currentTime + dt, dur); return; }
+      }
+    }
     if (remain <= automix.fadeLen) startFade(P, O, Math.max(0.3, remain));
   } else if (playing.length === 0) {
     // Song lief ganz aus (z. B. kürzer als die Überblendung) → nächsten direkt starten

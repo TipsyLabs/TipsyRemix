@@ -12,7 +12,7 @@
 - Kanal-Mute: Finger auf die Fader-Schiene unter den Griff legen (stumm, solange er liegt)
 - Wellenform-Modus SMUDGE (Scrub/Pitch-Bend) oder VINYL (Platte anfassen = Stopp, ziehen = Scratch vor/zurück)
 - Playlist (Lasche unten rechts): mehrere Songs hinzufügen, Tippen lädt ins freie Deck, Halten & Ziehen sortiert
-- Automix: spielt die Playlist der Reihe nach mit Crossfader-Überblendung (3–10 s) und Bass-Übergabe, danach wieder von vorn
+- Automix: spielt die Playlist der Reihe nach mit Crossfader-Überblendung (3–10 s) und Bass-Übergabe, danach wieder von vorn; liegen die Songs höchstens ±10 BPM auseinander, steigt der neue tempo-synchron auf der Takt-"1" ein
 - Endwarnung: in den letzten 30 s eines Songs pulsiert die Wellenform rot auf der "1" jedes Takts
 - Aufnahme des Mixes als MP3 (320 kbps)
 - Alles auf einem Bildschirm: die Konsole skaliert sich automatisch auf iPad quer/hoch

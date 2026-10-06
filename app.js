@@ -16,8 +16,8 @@ const HOTCUE_COLORS = ['#ff4d6d', '#ffd23f', '#3ddc97', '#b388ff'];
 const LOOP_BEATS = [1, 2, 4, 8, 16];
 const EQ_LOW_X = 250;                   // Trennfrequenz Bass/Mitten (Hz)
 const EQ_HIGH_X = 2500;                 // Trennfrequenz Mitten/Höhen (Hz)
-const ECHO_MAX_DELAY = 8;               // s (1 Takt bei 30 BPM)
-const ECHO_FEEDBACK = 0.5;              // jede Wiederholung -6 dB
+const ECHO_MAX_DELAY = 2;               // s (1 Beat bei 30 BPM)
+const ECHO_FEEDBACK_MAX = 0.8;          // Rückkopplung höchstens (je Wiederholung ≥ -2 dB)
 const ECHO_WET = 0.9;
 const END_WARN_S = 30;                  // letzte Sekunden eines Songs: Wellenform pulsiert im Takt
 const ECHO_LEN_MIN = 1;                 // Ausklingzeit (s), einstellbar per Fader
@@ -737,9 +737,9 @@ const DECK_TEMPLATE = id => `
         <div class="loops" data-el="loops"></div>
       </div>
       <div class="group">
-        <div class="group-label">Echo Out · 1 Takt <span class="echo-len-val" data-el="echoLenVal"></span></div>
+        <div class="group-label">Echo Out · 1 Beat <span class="echo-len-val" data-el="echoLenVal"></span></div>
         <div class="echo-row">
-          <button class="btn echo" data-el="echo" title="Deck stoppt, der letzte Takt hallt aus. Nochmal drücken = Echo abbrechen.">ECHO OUT</button>
+          <button class="btn echo" data-el="echo" title="Deck stoppt, der letzte Beat hallt im Takt aus. Nochmal drücken = Echo abbrechen.">ECHO OUT</button>
           <div class="echo-len" data-el="echoLenSlot" title="Ausklingzeit des Echos"></div>
         </div>
       </div>
@@ -1233,13 +1233,14 @@ class Deck {
 
   /* ---- Echo Out ---- */
 
-  barSeconds() {
-    return 240 / ((this.bpm || 128) * this.rate);
+  // Echo-Abstand: 1 Beat im aktuell hörbaren Tempo (ohne BPM: 128)
+  beatSeconds() {
+    return 60 / ((this.bpm || 128) * this.rate);
   }
 
   updateEchoTime() {
     if (this.echoActive) return;   // während des Ausklingens nicht verstellen
-    this.echoDelay.delayTime.setValueAtTime(clamp(this.barSeconds(), 0.05, ECHO_MAX_DELAY), ctx.currentTime);
+    this.echoDelay.delayTime.setValueAtTime(clamp(this.beatSeconds(), 0.05, ECHO_MAX_DELAY), ctx.currentTime);
   }
 
   echoOut() {
@@ -1250,7 +1251,10 @@ class Deck {
     this.echoActive = true;
     this.echoSend.gain.setTargetAtTime(0, now, 0.005);
     fb.cancelScheduledValues(now);
-    fb.setTargetAtTime(ECHO_FEEDBACK, now, 0.005);
+    // Rückkopplung passend zur Länge: die Wiederholungen (1 Beat Abstand) sollen sich über die
+    // ganze eingestellte Ausklingzeit verteilen statt nach wenigen Beats verschwunden zu sein
+    const repeats = Math.max(1, len / clamp(this.beatSeconds(), 0.05, ECHO_MAX_DELAY));
+    fb.setTargetAtTime(clamp(Math.pow(10, -1 / repeats), 0.3, ECHO_FEEDBACK_MAX), now, 0.005);   // ≈ -20 dB über die Länge, Rest macht die Ausblendkurve
     // Wet kurz einblenden, dann über die eingestellte Länge bis zur Stille ausblenden
     wet.cancelScheduledValues(now);
     wet.setValueAtTime(wet.value, now);

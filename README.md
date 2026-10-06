@@ -8,7 +8,7 @@
 - 2 Decks mit Wellenform, Beatgrid, automatischer BPM-Erkennung, CUE, 4 Hot Cues, Loops (1–16 Beats)
 - Tempo ±8/16/50 %, SYNC (Tempo + Beat), Key Lock (Tonhöhe bleibt gleich)
 - Mixer: Gain, 3-Band-Isolator (Bass/Mitten/Höhen bis Kill), Filter (an den Anschlägen stumm), Kanalfader, Crossfader
-- Echo Out (1 Takt, Ausklingzeit 1–5 s)
+- Echo Out (1 Beat, Ausklingzeit 1–5 s)
 - Kanal-Mute: Finger auf die Fader-Schiene unter den Griff legen (stumm, solange er liegt)
 - Wellenform-Modus SMUDGE (Scrub/Pitch-Bend) oder VINYL (Platte anfassen = Stopp, ziehen = Scratch vor/zurück)
 - Playlist (Lasche unten rechts): mehrere Songs hinzufügen, Tippen lädt ins freie Deck, Halten & Ziehen sortiert

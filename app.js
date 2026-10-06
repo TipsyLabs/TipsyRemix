@@ -210,6 +210,7 @@ class ScratchProcessor extends AudioWorkletProcessor {
     this.port.onmessage = e => {
       const m = e.data;
       if (m.type === 'load') { this.l = m.l; this.r = m.r; this.len = m.l.length; this.gt = 0; this.g = 0; }
+      else if (m.type === 'unload') { this.l = this.r = null; this.len = 0; this.gt = 0; this.g = 0; }
       else if (m.type === 'start') { this.p = m.pos * sampleRate; this.pts = [[m.time, this.p]]; this.vel = 0; this.gt = 1; this.fresh = true; }
       else if (m.type === 'move') {
         for (const [t, pos] of m.pts) {
@@ -821,6 +822,7 @@ class Deck {
     this.loading = false;
     this.playlistId = null;          // geladener Playlist-Eintrag (oder null)
     this.scratchNode = null;
+    this.scratchLoaded = false;
     this.scratching = false;
     this.scratchWasPlaying = false;
     this.zoomSpan = 6;
@@ -1080,12 +1082,15 @@ class Deck {
   attachScratch(node) {
     this.scratchNode = node;
     node.connect(this.norm);   // am Key Lock vorbei: beim Scratchen soll die Tonhöhe mitgehen
-    if (this.buffer) this.sendScratchData();
+    if (this.buffer && waveMode === 'vinyl') this.sendScratchData();
   }
 
-  // Track als 16-Bit-Kopie an den Scratch-Player geben (halber Speicher, reicht fürs Scratchen)
+  // Track als 16-Bit-Kopie an den Scratch-Player geben (halber Speicher, reicht fürs Scratchen).
+  // Nur im Vinyl-Modus – auf dem iPad ist der Speicher knapp; wird er überschritten,
+  // lädt Safari die Seite neu und die Musik bricht ab.
   sendScratchData() {
-    if (!this.scratchNode || !this.buffer) return;
+    if (!this.scratchNode || !this.buffer || this.scratchLoaded) return;
+    this.scratchLoaded = true;
     const toI16 = ch => {
       const f = this.buffer.getChannelData(ch), o = new Int16Array(f.length);
       for (let i = 0; i < f.length; i++) {
@@ -1099,8 +1104,15 @@ class Deck {
     this.scratchNode.port.postMessage({ type: 'load', l, r }, r === l ? [l.buffer] : [l.buffer, r.buffer]);
   }
 
+  dropScratchData() {
+    if (!this.scratchNode || !this.scratchLoaded) return;
+    this.scratchLoaded = false;
+    this.scratchNode.port.postMessage({ type: 'unload' });
+  }
+
   startScratch() {
     if (this.scratching) return;
+    this.sendScratchData();
     this.scratchWasPlaying = this.playing;
     this.cuePreview = false;
     this.pause();
@@ -1219,6 +1231,14 @@ class Deck {
     if (typeof onDeckChange === 'function') onDeckChange();
     setText(this.el.title, `Lade „${file.name}“ …`);
     this.el.hint.style.display = 'none';
+    // Alten Song vorher freigeben: sonst liegen beim Wechsel kurz zwei dekodierte Songs
+    // pro Deck im Speicher (auf dem iPad bis zum Neuladen der Seite)
+    this.stopSource();
+    this.buffer = null;
+    this.wave = null;
+    this.ovCache = null;
+    this.offset = 0;
+    this.dropScratchData();
     try {
       const data = await file.arrayBuffer();
       const buf = await ctx.decodeAudioData(data);
@@ -1241,7 +1261,7 @@ class Deck {
       const rmsDb = 20 * Math.log10(w.rms + 1e-9);
       this.norm.gain.value = dbToGain(clamp(-14 - rmsDb, -12, 6));
       this.scratching = false;
-      this.sendScratchData();
+      if (waveMode === 'vinyl') this.sendScratchData();
 
       setText(this.el.title, file.name.replace(/\.[^.]+$/, ''));
       this.el.title.title = file.name;
@@ -1650,6 +1670,7 @@ function buildStrip(deck, container) {
     createKnob({ label: 'Low', bipolar: true, format: eqFmt, onInput: v => deck.setEq('low', v) }),
     createKnob({ label: 'Filter', bipolar: true, format: filterFmt, onInput: v => deck.setFilter(v) }),
   ];
+  deck.knobs = { gain: knobs[0], high: knobs[1], mid: knobs[2], low: knobs[3], filter: knobs[4] };
   const knobBox = document.createElement('div');
   knobBox.className = 'strip-knobs';
   knobBox.append(...knobs);
@@ -1692,7 +1713,12 @@ function applyCrossfader() {
 
 const xfader = createFader({
   orient: 'h', min: 0, max: 1, value: 0.5, def: 0.5, center: true,
-  onInput: v => { xfValue = v; applyCrossfader(); },
+  onInput: v => {
+    xfValue = v;
+    // Greift jemand während einer Automix-Überblendung zum Crossfader, hat die Hand Vorrang
+    if (typeof automix !== 'undefined' && automix.fade) automix.fade.manual = true;
+    applyCrossfader();
+  },
 });
 xfader.classList.add('xfader-ctl');
 document.getElementById('xfSlot').append(xfader);
@@ -1710,6 +1736,10 @@ applyCrossfader();
 const modeSwitch = document.getElementById('waveMode');
 function setWaveMode(mode) {
   waveMode = mode;
+  // Scratch-Kopien nur im Vinyl-Modus im Speicher halten
+  if (typeof decks !== 'undefined') {
+    for (const d of decks) mode === 'vinyl' ? d.sendScratchData() : d.dropScratchData();
+  }
   for (const b of modeSwitch.querySelectorAll('.mode-btn')) {
     const on = b.dataset.mode === mode;
     b.classList.toggle('on', on);
@@ -2129,11 +2159,13 @@ function nextItem() {
   return i >= 0 ? playlist[(i + 1) % playlist.length] : playlist[automix.fallback % playlist.length];
 }
 
-// lädt den nächsten Song; ist einer defekt, wird der folgende versucht
+// lädt den nächsten Song; ist einer defekt, wird der folgende versucht.
+// Was im anderen Deck schon liegt, wird übersprungen (sonst läuft derselbe Song zweimal).
 async function loadNextInto(deck) {
-  for (let tries = 0; tries < playlist.length; tries++) {
+  for (let tries = 0; tries < playlist.length + 1; tries++) {
     const item = nextItem();
     if (!item) return false;
+    if (playlist.length > 1 && item.id === deck.other.playlistId) { automix.lastId = item.id; continue; }
     if (await loadItem(item, deck)) return true;
   }
   return false;
@@ -2170,21 +2202,67 @@ async function startAutomix() {
 
 function stopAutomix() {
   automix.on = false;
+  if (automix.fade) {
+    finishFadeVolumes(automix.fade, false);
+    const f = automix.fade;
+    bassRestore = { start: ctx.currentTime, decks: [[f.from, f.from.knobs.low.getValue()], [f.to, f.to.knobs.low.getValue()]] };
+  }
   automix.fade = null;
   updateAutomixButton();
 }
 
 function updateAutomixButton() {
   automixBtn.classList.toggle('on', automix.on);
+  plEl.classList.toggle('automix-on', automix.on);   // Lasche pulsiert, solange Automix läuft
   automixBtn.textContent = automix.on ? 'Automix an' : 'Automix';
   automixBtn.setAttribute('aria-pressed', String(automix.on));
 }
 automixBtn.addEventListener('click', () => (automix.on ? stopAutomix() : startAutomix()));
 
+// Überblendung mit eigener Kurve: der neue Song wird über die ganze Dauer gleichmäßig
+// lauter, der alte gleichmäßig leiser (Equal Power) – egal wo der Crossfader stand.
+// Der Crossfader-Griff wandert dabei sichtbar mit. Der Bass beider Decks geht
+// langsam auf 50 % (Low-Knopf halb nach links), danach zurück in die Mitte.
+const AUTOMIX_BASS = -0.5;
+const BASS_RESTORE_S = 0.8;
+
 function startFade(from, to, dur) {
   to.seek(to.wave ? to.wave.soundStart : 0);
+  const now = ctx.currentTime;
+  to.xf.gain.cancelScheduledValues(now);
+  to.xf.gain.setValueAtTime(0, now);           // neuer Song startet wirklich leise
   to.play();
-  automix.fade = { from, to, start: ctx.currentTime, dur, x0: xfader.getValue(), x1: xfSide(to) };
+  automix.fade = {
+    from, to, start: now, dur, x0: xfader.getValue(), x1: xfSide(to), manual: false,
+    bass0: { from: from.knobs.low.getValue(), to: to.knobs.low.getValue() },
+  };
+}
+
+function setFadeGains(f, t) {
+  const now = ctx.currentTime;
+  f.to.xf.gain.setTargetAtTime(Math.sin(t * Math.PI / 2), now, 0.01);
+  f.from.xf.gain.setTargetAtTime(Math.cos(t * Math.PI / 2), now, 0.01);
+}
+
+// Ende (oder Abbruch) der Überblendung: Crossfader-Stellung wieder maßgeblich machen
+function finishFadeVolumes(f, completed) {
+  if (completed) xfader.setValue(f.x1, true);
+  else applyCrossfader();
+}
+
+function fadeBass(f, t) {
+  for (const [d, v0] of [[f.from, f.bass0.from], [f.to, f.bass0.to]]) {
+    d.knobs.low.setValue(v0 + (AUTOMIX_BASS - v0) * t, true);
+  }
+}
+
+// Bass nach der Überblendung sanft zurück in die Mitte
+let bassRestore = null;
+function bassRestoreTick() {
+  if (!bassRestore) return;
+  const t = clamp((ctx.currentTime - bassRestore.start) / BASS_RESTORE_S, 0, 1);
+  for (const [d, v0] of bassRestore.decks) d.knobs.low.setValue(v0 * (1 - t), true);
+  if (t >= 1) bassRestore = null;
 }
 
 function loadIntoFreed(deck) {
@@ -2193,15 +2271,23 @@ function loadIntoFreed(deck) {
 }
 
 function automixTick() {
+  bassRestoreTick();
   if (!automix.on) return;
   const f = automix.fade;
   if (f) {
-    if (!f.to.playing) { automix.fade = null; return; }      // Ziel-Deck von Hand gestoppt
+    if (!f.to.playing) { finishFadeVolumes(f, false); automix.fade = null; return; }   // Ziel-Deck von Hand gestoppt
     const t = clamp((ctx.currentTime - f.start) / f.dur, 0, 1);
-    xfader.setValue(f.x0 + (f.x1 - f.x0) * t, true);
+    if (!f.manual) {
+      xfader.setValue(f.x0 + (f.x1 - f.x0) * t, false);   // Griff wandert mit (ohne Kurve)
+      setFadeGains(f, t);
+    }
+    fadeBass(f, t);
     if (t >= 1) {
       f.from.pause();
+      if (!f.manual) finishFadeVolumes(f, true);
       automix.fade = null;
+      bassRestore = { start: ctx.currentTime, decks: [[f.to, f.to.knobs.low.getValue()]] };
+      f.from.knobs.low.setValue(0, true);                  // gestopptes Deck: gleich in die Mitte
       loadIntoFreed(f.from);
     }
     return;
@@ -2298,6 +2384,27 @@ function onDeckChange() { updatePlaylistStatus(); }
 function playlistTick() {
   automixTick();
   updatePlaylistStatus();
+  wakeLockTick();
+}
+
+// Screen Wake Lock: das iPad soll nicht mitten im Mix in den Ruhezustand gehen
+let wakeLock = null, wakeBusy = false, wakeCheck = 0;
+function wakeLockTick() {
+  const now = performance.now();
+  if (now - wakeCheck < 1000 || wakeBusy || !navigator.wakeLock) return;
+  wakeCheck = now;
+  const want = document.visibilityState === 'visible' && (decks.some(d => d.playing) || automix.on || !!recorder);
+  if (want === !!wakeLock) return;
+  wakeBusy = true;
+  const done = () => { wakeBusy = false; };
+  if (want) {
+    navigator.wakeLock.request('screen').then(l => {
+      wakeLock = l;
+      l.addEventListener('release', () => { if (wakeLock === l) wakeLock = null; });
+    }).catch(() => { /* nicht erlaubt – dann eben nicht */ }).finally(done);
+  } else {
+    wakeLock.release().catch(() => {}).finally(() => { wakeLock = null; done(); });
+  }
 }
 
 /* ---- Tippen, Wischen, Halten & Ziehen ----

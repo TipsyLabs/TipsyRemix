@@ -123,6 +123,7 @@ class ScratchProcessor extends AudioWorkletProcessor {
     this.port.onmessage = e => {
       const m = e.data;
       if (m.type === 'load') { this.l = m.l; this.r = m.r; this.len = m.l.length; this.gt = 0; this.g = 0; }
+      else if (m.type === 'unload') { this.l = this.r = null; this.len = 0; this.gt = 0; this.g = 0; }
       else if (m.type === 'start') { this.p = m.pos * sampleRate; this.pts = [[m.time, this.p]]; this.vel = 0; this.gt = 1; this.fresh = true; }
       else if (m.type === 'move') {
         for (const [t, pos] of m.pts) {

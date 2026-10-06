@@ -411,6 +411,12 @@ html[data-layout="flow"] .mode-switch { grid-column: 1 / -1; justify-self: cente
   background: var(--on-accent); color: var(--pl); font-size: 12px; letter-spacing: 0;
 }
 .pl-tab:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }
+/* Automix läuft: Lasche pulsiert dezent */
+.playlist.automix-on .pl-tab { animation: plPulse 1.8s ease-in-out infinite; }
+@keyframes plPulse {
+  0%, 100% { filter: none; box-shadow: -4px 0 14px rgba(0, 0, 0, .4); }
+  50% { filter: brightness(1.25); box-shadow: -4px 0 14px rgba(0, 0, 0, .4), 0 0 18px color-mix(in srgb, var(--pl) 75%, transparent); }
+}
 
 .pl-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .pl-title { font: 700 22px var(--font-cond); letter-spacing: .5px; }

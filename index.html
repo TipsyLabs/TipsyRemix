@@ -77,6 +77,16 @@
 
     <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 
+    <!-- erscheint nur, wenn der Browser die Seite von sich aus neu geladen hat -->
+    <div class="crash-note" id="crashNote" role="alertdialog" aria-labelledby="crashTitle" hidden>
+      <div class="crash-card">
+        <div class="crash-title" id="crashTitle">TipsyRemix wurde neu geladen</div>
+        <p>Das hast nicht du ausgelöst, sondern der Browser – auf dem iPad passiert das meist, wenn der Speicher knapp wird. Mach bitte ein Foto von dieser Meldung, damit wir die Ursache finden.</p>
+        <pre class="crash-details"></pre>
+        <button class="btn">OK</button>
+      </div>
+    </div>
+
     <footer class="help">
       <span>Regler: nach links/rechts ziehen</span>
       <span>Doppeltipp = zurücksetzen</span>

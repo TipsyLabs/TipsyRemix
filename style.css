@@ -491,6 +491,28 @@ html[data-layout="flow"] .mode-switch { grid-column: 1 / -1; justify-self: cente
 }
 .toast.show { opacity: 1; transform: translate(-50%, -50%) scale(1); }
 
+/* Hinweis nach ungewolltem Neuladen */
+.crash-note {
+  position: absolute; inset: 0; z-index: 50;
+  display: grid; place-items: center; padding: 24px;
+  background: rgba(5, 7, 10, .72);
+}
+.crash-note[hidden] { display: none; }
+.crash-card {
+  width: min(560px, 100%); display: flex; flex-direction: column; gap: 12px;
+  padding: 22px 24px; background: var(--panel); border: 1px solid var(--cue); border-radius: 16px;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, .6);
+}
+.crash-title { font: 700 22px var(--font-cond); color: var(--cue); letter-spacing: .5px; }
+.crash-card p { margin: 0; line-height: 1.5; color: var(--text); }
+.crash-details {
+  margin: 0; padding: 12px; white-space: pre-wrap; overflow-wrap: anywhere;
+  background: var(--well); border: 1px solid var(--line); border-radius: 10px;
+  color: var(--muted); font: 500 13px/1.5 var(--font-body);
+  -webkit-user-select: text; user-select: text;
+}
+.crash-card .btn { align-self: flex-end; min-width: 120px; }
+
 /* Handy (scrollende Seite): Playlist am Bildschirm festmachen */
 html[data-layout="flow"] .playlist { position: fixed; top: 0; bottom: 0; border-radius: 0; }
 html[data-layout="flow"] .toast { position: fixed; }

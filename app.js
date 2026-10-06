@@ -2082,24 +2082,35 @@ function addFiles(files) {
   }
 }
 
-// Länge nur aus den Metadaten lesen (schnell, ohne den Song zu dekodieren) – einer nach dem anderen
+// Länge nur aus den Metadaten lesen (schnell, ohne den Song zu dekodieren) – einer nach dem anderen.
+// Bisher bekam jeder Song ein eigenes Audio-Element, das nie geleert wurde: auf dem iPad blieb
+// so pro Song ein Player im Speicher. Jetzt gibt es genau eines, das nach jedem Song freigegeben wird.
 let readingDuration = false;
+const durationProbe = new Audio();
+durationProbe.preload = 'metadata';
+durationProbe.muted = true;
 function readNextDuration() {
   if (readingDuration || !durationQueue.length) return;
   readingDuration = true;
   const item = durationQueue.shift();
   const url = URL.createObjectURL(item.file);
-  const a = new Audio();
-  a.preload = 'metadata';
+  let finished = false;
   const done = () => {
+    if (finished) return;
+    finished = true;
+    clearTimeout(timer);
+    durationProbe.onloadedmetadata = durationProbe.onerror = null;
+    durationProbe.removeAttribute('src');
+    durationProbe.load();                    // Player-Ressourcen wirklich freigeben
     URL.revokeObjectURL(url);
     readingDuration = false;
     renderPlaylist();
     readNextDuration();
   };
-  a.onloadedmetadata = () => { if (isFinite(a.duration)) item.duration = a.duration; done(); };
-  a.onerror = done;
-  a.src = url;
+  const timer = setTimeout(done, 4000);      // manche Browser liefern ohne Tippen keine Metadaten
+  durationProbe.onloadedmetadata = () => { if (isFinite(durationProbe.duration)) item.duration = durationProbe.duration; done(); };
+  durationProbe.onerror = done;
+  durationProbe.src = url;
 }
 
 document.getElementById('plFiles').addEventListener('change', e => {
@@ -2166,6 +2177,8 @@ async function loadNextInto(deck) {
     const item = nextItem();
     if (!item) return false;
     if (playlist.length > 1 && item.id === deck.other.playlistId) { automix.lastId = item.id; continue; }
+    // liegt genau dieser Song schon im Deck, nicht neu laden (spart Zeit und Speicher)
+    if (deck.buffer && !deck.loading && deck.playlistId === item.id) { automix.lastId = item.id; return true; }
     if (await loadItem(item, deck)) return true;
   }
   return false;
@@ -2180,8 +2193,10 @@ async function startAutomix() {
   if (decks.some(d => d.loading)) { showToast('Ein Deck lädt gerade – einen Moment.'); return; }
   automix.on = true;
   automix.fade = null;
-  automix.lastId = null;           // Automix beginnt mit dem ersten Song der Playlist
-  automix.fallback = 0;
+  // Läuft gerade ein Song aus der Playlist, geht es mit dem danach weiter – sonst von vorn
+  const current = playing.length === 1 ? playlist.find(it => it.id === playing[0].playlistId) : null;
+  if (current) automix.lastId = current.id;
+  else { automix.lastId = null; automix.fallback = 0; }
   updateAutomixButton();
   automix.busy = true;
   try {
@@ -2518,12 +2533,83 @@ function endDrag(cancelled) {
   if (!cancelled && d.to !== d.from) {
     const [item] = playlist.splice(d.from, 1);
     playlist.splice(d.to, 0, item);
+    loadIfRightAfterPlaying(item);
   }
   renderPlaylist();
 }
 
+// Liegt der verschobene Song jetzt direkt hinter dem laufenden, kommt er ins freie Deck
+function loadIfRightAfterPlaying(item) {
+  const playingDeck = decks.find(dk => dk.playing && dk.playlistId != null);
+  if (!playingDeck) return;
+  const i = playlist.findIndex(it => it.id === playingDeck.playlistId);
+  if (i < 0 || playlist[i + 1] !== item) return;
+  const free = playingDeck.other;
+  if (free.playing || free.loading || free.scratching || automix.fade || automix.busy) return;
+  if (free.playlistId === item.id) { automix.lastId = item.id; return; }
+  loadItem(item, free);
+}
+
 updateAutomixButton();
 renderPlaylist();
+
+/* ---------------- Diagnose: hat das iPad die Seite neu geladen? ----------------
+   Alle 2 s wird ein kleiner Zustand gemerkt. Schließt oder lädt man die Seite
+   selbst neu, wird er als "sauber beendet" markiert. Steht beim Start noch
+   "läuft" drin, hat der Browser die Seite von sich aus neu geladen (auf dem
+   iPad meist wegen Speicher) – dann zeigen wir, was zuletzt los war. */
+
+const DIAG_KEY = 'tipsyremix.session', DIAG_ERR_KEY = 'tipsyremix.errors';
+const diagRead = k => { try { return JSON.parse(localStorage.getItem(k)); } catch (_) { return null; } };
+const diagWrite = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (_) { /* egal */ } };
+
+function audioMemoryMB() {
+  let bytes = 0;
+  for (const d of decks) {
+    if (!d.buffer) continue;
+    bytes += d.buffer.length * d.buffer.numberOfChannels * 4;
+    if (d.scratchLoaded) bytes += d.buffer.length * d.buffer.numberOfChannels * 2;
+  }
+  return Math.round(bytes / 1048576);
+}
+
+function logError(msg) {
+  const list = diagRead(DIAG_ERR_KEY) || [];
+  list.push({ t: new Date().toLocaleTimeString('de-DE'), msg: String(msg).slice(0, 160) });
+  diagWrite(DIAG_ERR_KEY, list.slice(-6));
+}
+window.addEventListener('error', e => logError(e.message || e.error));
+window.addEventListener('unhandledrejection', e => logError((e.reason && (e.reason.message || e.reason)) || 'Promise-Fehler'));
+
+function diagHeartbeat() {
+  diagWrite(DIAG_KEY, {
+    alive: true, ts: Date.now(),
+    playing: decks.some(d => d.playing), automix: automix.on,
+    songs: playlist.length, mem: audioMemoryMB(),
+    loading: decks.some(d => d.loading), mode: waveMode,
+  });
+}
+window.addEventListener('pagehide', () => diagWrite(DIAG_KEY, { alive: false, ts: Date.now() }));
+
+(function checkLastSession() {
+  const prev = diagRead(DIAG_KEY);
+  const errors = diagRead(DIAG_ERR_KEY) || [];
+  // nur melden, wenn beim Verschwinden der Seite Musik lief – sonst war es eher ein normales Schließen
+  if (!prev || !prev.alive || !(prev.playing || prev.automix) || Date.now() - prev.ts > 30 * 60 * 1000) return;
+  const box = document.getElementById('crashNote');
+  const lines = [
+    `Zuletzt (${new Date(prev.ts).toLocaleTimeString('de-DE')}): ${prev.playing ? 'Musik lief' : 'keine Musik'}, Automix ${prev.automix ? 'an' : 'aus'}, ${prev.songs} Songs in der Playlist, ${prev.loading ? 'ein Song wurde gerade geladen, ' : ''}ca. ${prev.mem} MB Audio im Speicher, Modus ${prev.mode === 'vinyl' ? 'Vinyl' : 'Smudge'}.`,
+    errors.length ? 'Letzte Fehler: ' + errors.map(e => `${e.t} ${e.msg}`).join(' · ') : 'Keine Fehler aufgezeichnet.',
+  ];
+  box.querySelector('.crash-details').textContent = lines.join('\n');
+  box.hidden = false;
+  box.querySelector('button').addEventListener('click', () => {
+    box.hidden = true;
+    diagWrite(DIAG_ERR_KEY, []);
+  });
+})();
+diagHeartbeat();
+setInterval(diagHeartbeat, 2000);
 
 /* ---------------- Ein Bildschirm: Konsole passend skalieren ----------------
    Die Konsole wird in einer festen Entwurfsbreite gesetzt (quer 1180 px,

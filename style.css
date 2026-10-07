@@ -89,6 +89,7 @@ body {
 html[data-wave-mode="vinyl"] .wave-zoom { cursor: pointer; }
 .logo { display: flex; align-items: center; gap: 10px; font-family: var(--font-cond); font-weight: 600; font-size: 26px; letter-spacing: .5px; }
 .logo-text b { font-weight: 700; color: var(--a); }
+.build-id { align-self: flex-end; margin-bottom: 4px; font: 500 10px var(--font-body); color: var(--muted); letter-spacing: .5px; }
 .logo-mark {
   width: 24px; height: 24px; border-radius: 50%; flex: none;
   background: conic-gradient(var(--a) 0 50%, var(--b) 50% 100%);

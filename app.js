@@ -82,9 +82,10 @@ limiter.connect(recDest);
 /* ---------------- AudioWorklets: Key Lock + MP3-Aufnahme ----------------
    Key Lock: Die Quelle läuft mit geändertem Tempo (und damit geänderter Tonhöhe);
    dieser Prozessor verschiebt die Tonhöhe um 1/Tempo zurück – mit EINEM Lesekopf,
-   der nur zwischen den Schlägen springt und sich vor jedem Kick/Snare so ausrichtet,
-   dass der Schlag genau nach 50 ms herauskommt. (Die frühere Version mit zwei
-   überblendeten Köpfen spielte Schläge doppelt – klang wie zwei versetzte Songs.)
+   der laufend in kleinen Schritten (3–8 ms) nachführt, nur in Lücken ohne Anschlag,
+   im lauten Bass phasenrichtig, und sich vor jedem Kick/Snare so ausrichtet, dass der
+   Schlag genau nach 50 ms herauskommt. (Frühere Versionen spielten Schläge doppelt –
+   klang wie zwei versetzte Songs.)
    Alle Decks haben dieselbe feste Verzögerung, damit Sync stimmt.
    Recorder: sammelt das Master-Signal als PCM und schickt es in Blöcken
    an die Seite, wo es live zu MP3 kodiert wird. */
@@ -95,79 +96,134 @@ class KeyLockProcessor extends AudioWorkletProcessor {
     return [{ name: 'pitch', defaultValue: 1, minValue: 0.25, maxValue: 4, automationRate: 'k-rate' }];
   }
   // Ein einziger Lesekopf läuft mit Faktor "pitch" über eine Delay-Line und korrigiert so die
-  // Tonhöhe. Weil er dabei langsam vom Schreibkopf wegdriftet, springt er ab und zu zurück
-  // (oder vor). Diese Sprünge setzt er nur dorthin, wo im übersprungenen/wiederholten Stück
-  // kein Anschlag (Kick, Snare, Hi-Hat) liegt, und an die Stelle, an der die Wellenform am
-  // besten passt (Korrelation) – so wird kein Schlag doppelt gespielt oder verschluckt.
-  // Kommt ein kräftiger Schlag (Kick/Snare) herein, springt er kurz davor so, dass genau
-  // dieser Schlag mit der Soll-Verzögerung herauskommt: die Schläge bleiben auf dem Grid
-  // (wichtig für den Sync mit dem anderen Deck), der Sprung liegt im leisen Ende des Beats.
+  // Tonhöhe. Weil er dabei vom Schreibkopf wegdriftet, springt er laufend in kleinen Schritten
+  // (meist 3–8 ms) zurück bzw. vor – aber nur in Lücken ohne Anschlag (Anschläge werden in drei
+  // Bändern ~50 ms vorher erkannt) und an der Stelle, an der die Wellenform am besten passt.
+  // Kleine Sprünge passen auch in dichte Musik; ein großer Sprung pro Beat erwischte dort
+  // fast immer einen Anschlag, der dann doppelt kam. Vor jedem Kick/Snare richtet er sich
+  // so aus, dass der Schlag genau mit der festen Verzögerung D0 herauskommt (gut für Sync).
   constructor() {
     super();
+    const sr = sampleRate;
     this.N = 1 << 16;                                   // Ringpuffer (≈ 1,4 s)
     this.mask = this.N - 1;
     this.L = new Float32Array(this.N);
     this.R = new Float32Array(this.N);
+    this.M = new Float32Array(this.N);                  // Mono-Summe für die Korrelation
     this.CH = 64;                                       // Rahmen der Anschlagserkennung
-    this.onsets = new Uint8Array(this.N / this.CH);
+    this.onsets = new Uint8Array(this.N / this.CH);     // 0 nichts, 1 leicht, 2 kräftig
+    this.lowLvl = new Uint8Array(this.N / this.CH);     // Bass-Lautstärke je Rahmen (0–255 relativ zur Spitze)
     this.chMask = this.N / this.CH - 1;
-    this.chE = 0;
-    this.hist = new Float32Array(8);
-    this.histI = 0;
-    // Kick/Snare erkennt man am Bass-/Mittenanteil, Hi-Hats haben dort kaum Energie
-    this.lpA = 1 - Math.exp(-2 * Math.PI * 400 / sampleRate);
-    this.lp = 0;
-    this.chLow = 0;
-    this.histLow = new Float32Array(8);
-    this.prevFlag = 0;
-    this.peakLow = 0;                                    // langsam fallende Spitzen der Energie
-    this.peakAll = 0;
+    // drei Bänder: Bass (< 300 Hz), Gesamt, Höhen (> 3 kHz)
+    this.aLo = 1 - Math.exp(-2 * Math.PI * 300 / sr);
+    this.aHi = 1 - Math.exp(-2 * Math.PI * 3000 / sr);
+    this.lo = 0; this.lp3k = 0;
+    this.eLo = 0; this.eAll = 0; this.eHi = 0;
+    this.hLo = new Float32Array(8); this.hAll = new Float32Array(8); this.hHi = new Float32Array(8);
+    this.hI = 0;
+    this.pkLo = 0; this.pkAll = 0; this.pkHi = 0;
+    this.prevStrong = false;
     this.w = 0;                                         // nächste Schreibposition (absolut)
-    this.D0 = Math.round(0.05 * sampleRate);            // Soll-Verzögerung (für alle Decks gleich)
+    this.D0 = Math.round(0.05 * sr);                    // Soll-Verzögerung (für alle Decks gleich)
     this.pos = -this.D0;                                // Lesekopf (absolut, gebrochen)
     this.old = null;                                    // ausblendender Lesekopf beim Sprung
     this.xf = 0;
-    this.Lc = Math.round(0.008 * sampleRate);           // Überblendung beim Sprung
-    this.Wc = Math.round(0.010 * sampleRate);           // Vergleichsfenster für die Korrelation
-    this.S = Math.round(0.004 * sampleRate);            // Suchbereich ± um das Sprungziel
-    this.margin = this.S + Math.round(0.003 * sampleRate);
-    this.protectStrong = Math.round(0.06 * sampleRate);   // nach Kick/Snare: Ausklang schützen
-    this.protectWeak = Math.round(0.015 * sampleRate);    // nach Hi-Hat & Co.
-    this.ref = new Float32Array(this.Wc);
+    this.Lc = Math.round(0.006 * sr);                   // Überblendung beim Sprung
+    this.Wc = Math.round(0.008 * sr);                   // Vergleichsfenster für die Korrelation
+    this.S = Math.round(0.003 * sr);                    // Suchbereich ± um das Sprungziel
+    // im lauten Bass (Kick-Körper, Basslinie) muss die Phase einer ganzen Schwingung passen:
+    this.Sbig = Math.round(0.010 * sr);
+    this.WcBig = Math.round(0.016 * sr);
+    this.lowQuiet = 0.2 * 255;                          // darunter gilt der Bass als leise
+    this.margin = this.S + Math.round(0.002 * sr);
+    // nur den Anschlag selbst schützen: bei so kleinen Sprüngen ist ein wiederholtes Stück
+    // aus dem Ausklang unhörbar, ein langer Schutz ließe in dichter Musik keine Lücken übrig
+    this.protectStrong = Math.round(0.015 * sr);
+    this.protectWeak = Math.round(0.006 * sr);
+    this.soft = 0.0025 * sr;                            // ab dieser Abweichung nachführen
+    this.step = 0.003 * sr;                             // so weit über die Mitte hinaus springen
     this.pending = null;                                // kräftiger Anschlag, auf den ausgerichtet wird
+    this.ref = new Float32Array(this.WcBig);
+    this.offs = new Int32Array(this.WcBig);
   }
   read(buf, pos) {
     const i = Math.floor(pos), f = pos - i, m = this.mask;
     return buf[i & m] * (1 - f) + buf[(i + 1) & m] * f;
   }
-  mono(pos) { return this.read(this.L, pos) + this.read(this.R, pos); }
-  // Darf zwischen den absoluten Positionen a und b gesprungen werden? Nicht, wenn dort ein
-  // Anschlag liegt oder das Stück noch im Ausklang eines Anschlags kurz davor steckt.
-  hasOnset(a, b) {
+  // Darf zwischen den absoluten Positionen a und b gesprungen werden?
+  // strongOnly: leichte Anschläge (Hi-Hats) ignorieren – zweite Wahl, bevor ein Sprung erzwungen wird
+  hasOnset(a, b, strongOnly) {
     const CH = this.CH, cs = Math.floor((a - this.protectStrong) / CH), cw = Math.floor((a - this.protectWeak) / CH);
     const c1 = Math.floor(b / CH);
     for (let c = cs; c <= c1; c++) {
       const f = this.onsets[c & this.chMask];
-      if (f === 2 || (f === 1 && c >= cw)) return true;
+      if (f === 2 || (f === 1 && c >= cw && !strongOnly)) return true;
     }
     return false;
   }
+  // ist der Bass zwischen a und b leise? (dann reicht ein kleiner Sprung ohne Phasen-Suche)
+  bassQuiet(a, b) {
+    const c0 = Math.floor(a / this.CH), c1 = Math.floor(b / this.CH);
+    for (let c = c0; c <= c1; c++) if (this.lowLvl[c & this.chMask] > this.lowQuiet) return false;
+    return true;
+  }
+  regionFree(target, strongOnly) {
+    return !this.hasOnset(Math.min(this.pos, target) - this.margin, Math.max(this.pos, target) + this.Lc + this.margin, strongOnly);
+  }
   // Sprung zum Ziel; genaue Stelle per Korrelation mit dem, was der alte Kopf gleich spielt
-  splice(target, p) {
-    const Wc = this.Wc, ref = this.ref;
-    for (let i = 0; i < Wc; i++) ref[i] = this.mono(this.pos + i * p);
-    let best = target, bestScore = -Infinity;
-    const lim = this.w - Wc * p - 2;                  // nichts lesen, was noch nicht geschrieben ist
-    for (let c = target - this.S; c <= target + this.S; c += 2) {
-      if (c > lim) break;
+  splice(target, p, wide) {
+    const Wc = wide ? this.WcBig : this.Wc, S = wide ? this.Sbig : this.S;
+    const ref = this.ref, offs = this.offs, M = this.M, m = this.mask;
+    const p0 = Math.round(this.pos);
+    for (let i = 0; i < Wc; i += 2) { offs[i] = Math.round(i * p); ref[i] = M[(p0 + offs[i]) & m]; }
+    const lim = this.w - Math.ceil(Wc * p) - 2;        // nichts lesen, was noch nicht geschrieben ist
+    const t0 = Math.round(target);
+    const score = (c, step) => {
       let dot = 0, en = 1e-9;
-      for (let i = 0; i < Wc; i += 2) { const v = this.mono(c + i * p); dot += ref[i] * v; en += v * v; }
-      const sc = dot / Math.sqrt(en);
+      for (let i = 0; i < Wc; i += step) { const v = M[(c + offs[i]) & m]; dot += ref[i] * v; en += v * v; }
+      return dot / Math.sqrt(en);
+    };
+    // grob (jede 4. Stelle, jedes 4. Sample), dann fein um den besten Treffer – spart Rechenzeit
+    const cs = wide ? 4 : 2;
+    let best = t0, bestScore = -Infinity;
+    for (let c = t0 - S; c <= t0 + S && c <= lim; c += cs) {
+      const sc = score(c, 4);
+      if (sc > bestScore) { bestScore = sc; best = c; }
+    }
+    const coarse = best;
+    bestScore = -Infinity;
+    for (let c = coarse - cs; c <= coarse + cs && c <= lim; c++) {
+      const sc = score(c, 2);
       if (sc > bestScore) { bestScore = sc; best = c; }
     }
     this.old = { pos: this.pos };
-    this.pos = best;
+    this.pos = best + (this.pos - p0);                  // Nachkommaanteil behalten
     this.xf = 0;
+  }
+  detect(sample) {
+    // Rahmen abgeschlossen: Energie je Band gegen die 8 Rahmen davor und gegen die letzten Spitzen
+    const CH = this.CH;
+    const eLo = this.eLo / CH, eAll = this.eAll / CH, eHi = this.eHi / CH;
+    let aLo = 0, aAll = 0, aHi = 0;
+    for (let k = 0; k < 8; k++) { aLo += this.hLo[k]; aAll += this.hAll[k]; aHi += this.hHi[k]; }
+    aLo /= 8; aAll /= 8; aHi /= 8;
+    this.pkLo = Math.max(eLo, this.pkLo * 0.9995);
+    this.pkAll = Math.max(eAll, this.pkAll * 0.9995);
+    this.pkHi = Math.max(eHi, this.pkHi * 0.9995);
+    const strong = eLo > 5 * aLo + 1e-9 && eLo > 0.1 * this.pkLo;
+    // (Schwebungen zwischen Tönen lassen die Energie auch ohne Anschlag pulsieren –
+    //  deshalb deutliche Sprünge und Mindestlautstärke relativ zu den letzten Spitzen)
+    const weak = strong
+      || (eAll > 4 * aAll + 1e-9 && eAll > 0.02 * this.pkAll)
+      || (eHi > 4 * aHi + 1e-9 && eHi > 0.05 * this.pkHi);
+    const ci = ((this.w / CH) - 1) & this.chMask;
+    this.onsets[ci] = strong ? 2 : weak ? 1 : 0;
+    this.lowLvl[ci] = Math.min(255, Math.round(255 * eLo / (this.pkLo + 1e-12)));
+    if (strong && !this.prevStrong) this.pending = this.w - CH;   // neuer Kick/Snare → darauf ausrichten
+    this.prevStrong = strong;
+    const j = this.hI++ & 7;
+    this.hLo[j] = eLo; this.hAll[j] = eAll; this.hHi[j] = eHi;
+    this.eLo = this.eAll = this.eHi = 0;
   }
   process(inputs, outputs, params) {
     const inp = inputs[0], out = outputs[0];
@@ -175,73 +231,57 @@ class KeyLockProcessor extends AudioWorkletProcessor {
     const iL = inp[0], iR = inp[1] || inp[0];
     const n = oL.length, p = params.pitch[0], sr = sampleRate;
 
-    // Kräftiger Anschlag im Anmarsch: so springen, dass er genau mit Verzögerung D0 herauskommt
-    if (this.pending !== null && !this.old) {
-      const q = this.pending;
-      this.pending = null;
-      // Leseposition r, ab der der Kopf (Faktor p) den Anschlag q nach (D0 - Alter) Samples erreicht
-      const target = q - p * (this.D0 - (this.w - q));
-      const jump = Math.abs(target - this.pos);
-      const safe = target + this.Lc * p + this.margin < q && this.pos < q - this.margin;
-      if (jump > 0.0005 * sr && safe &&
-          !this.hasOnset(Math.min(this.pos, target) - this.margin, Math.max(this.pos, target) + this.Lc + this.margin)) {
-        this.splice(target, p);
-      }
-    }
-
-    // Sprung nötig/erlaubt? (zu Beginn jedes Blocks, nicht während einer Überblendung)
     if (!this.old) {
       const D = this.w - this.pos;                     // aktuelle Verzögerung in Samples
-      const dev = (D - this.D0) / sr;
-      const R = Math.min(0.035, 0.006 + 0.2 * Math.abs(1 - p));   // erlaubte Abweichung (s)
-      let want = null;
-      // erst ab der halben erlaubten Abweichung springen (seltener, dafür passend platziert)
-      if (p < 1 - 1e-6) { if (dev > 0.5 * R) want = this.D0 - 0.6 * R * sr; }
-      else if (p > 1 + 1e-6) { if (dev < -0.5 * R) want = this.D0 + 0.6 * R * sr; }
-      else if (Math.abs(dev) > 0.001) want = this.D0;
-      if (want !== null) {
-        const target = this.w - want;
-        const forced = Math.abs(dev) >= R || D < 2 * this.Wc;
-        const a = Math.min(this.pos, target) - this.margin;
-        const b = Math.max(this.pos, target) + this.Lc + this.margin;
-        if (forced || !this.hasOnset(a, b)) this.splice(target, p);
+      const dev = D - this.D0;
+      let done = false;
+      // 1) Kick/Snare im Anmarsch: so springen, dass genau dieser Schlag mit D0 herauskommt
+      if (this.pending !== null) {
+        const q = this.pending;
+        this.pending = null;
+        const target = q - p * (this.D0 - (this.w - q));
+        const safe = target + this.Lc * p + this.margin < q && this.pos < q - this.margin;
+        if (Math.abs(target - this.pos) > 0.0005 * sr && safe && this.regionFree(target)) {
+          this.splice(target, p, !this.bassQuiet(Math.min(this.pos, target), Math.max(this.pos, target) + this.Wc));
+          done = true;
+        }
+      }
+      // 2) laufend in kleinen Schritten nachführen, wenn die Lücke frei ist
+      if (!done) {
+        const R = Math.min(0.04, 0.008 + 0.3 * Math.abs(1 - p)) * sr;   // spätestens hier wird gesprungen
+        let want = null;
+        if (dev > this.soft && p <= 1) want = this.D0 - this.step;
+        else if (dev < -this.soft && p >= 1) want = this.D0 + this.step;
+        else if (Math.abs(dev) > this.soft) want = this.D0;            // Tempo wurde umgestellt
+        if (want !== null) {
+          const target = this.w - want;
+          const forced = Math.abs(dev) >= R || D < 2 * this.WcBig;
+          const relaxed = Math.abs(dev) >= 0.4 * R;          // lange nichts gefunden: Hi-Hats/Bass in Kauf nehmen
+          const quiet = this.bassQuiet(Math.min(this.pos, target), Math.max(this.pos, target) + this.Wc);
+          // 1. Wahl: freie Lücke mit leisem Bass → kleiner Sprung
+          // 2. Wahl: nur kräftige Anschläge meiden → Sprung mit Phasen-Suche über eine Bass-Schwingung
+          if (!relaxed && !forced) { if (quiet && this.regionFree(target)) this.splice(target, p, false); }
+          else if (forced || this.regionFree(target, true)) this.splice(target, p, !quiet);
+        }
       }
     }
 
-    const m = this.mask, CH = this.CH;
+    const m = this.mask, CH = this.CH, aLo = this.aLo, aHi = this.aHi;
     for (let i = 0; i < n; i++) {
-      // schreiben + Anschläge erkennen (Energie eines 64er-Rahmens gegen die 8 davor)
-      const xl = iL ? iL[i] : 0, xr = iR ? iR[i] : 0;
+      const xl = iL ? iL[i] : 0, xr = iR ? iR[i] : 0, x = xl + xr;
       const wi = this.w & m;
       this.L[wi] = xl;
       this.R[wi] = xr;
-      this.chE += xl * xl + xr * xr;
-      this.lp += this.lpA * (xl + xr - this.lp);
-      this.chLow += this.lp * this.lp;
+      this.M[wi] = x;
+      this.lo += aLo * (x - this.lo);
+      this.lp3k += aHi * (x - this.lp3k);
+      const hi = x - this.lp3k;
+      this.eLo += this.lo * this.lo;
+      this.eAll += x * x;
+      this.eHi += hi * hi;
       this.w++;
-      if ((this.w & (CH - 1)) === 0) {
-        const e = this.chE / CH, el = this.chLow / CH;
-        let avg = 0, avgLow = 0;
-        for (let k = 0; k < 8; k++) { avg += this.hist[k]; avgLow += this.histLow[k]; }
-        avg /= 8;
-        avgLow /= 8;
-        // 2 = kräftig (Bass/Mitten springen: Kick, Snare), 1 = leicht (Hi-Hat & Co.)
-        this.peakLow = Math.max(el, this.peakLow * 0.9995);
-        this.peakAll = Math.max(e, this.peakAll * 0.9995);
-        // Schwebungen zwischen Tönen lassen die Energie auch ohne Anschlag pulsieren –
-        // deshalb deutlicher Sprung UND eine Mindestlautstärke relativ zu den letzten Spitzen
-        const flag = el > 6 * avgLow + 1e-8 && el > 0.1 * this.peakLow ? 2
-          : e > 4 * avg + 1e-8 && e > 0.02 * this.peakAll ? 1 : 0;
-        this.histLow[this.histI & 7] = el;
-        this.chLow = 0;
-        this.onsets[((this.w / CH) - 1) & this.chMask] = flag;
-        // neuer kräftiger Anschlag (der vorige Rahmen war noch keiner) → darauf ausrichten
-        if (flag === 2 && this.prevFlag !== 2) this.pending = this.w - CH;
-        this.prevFlag = flag;
-        this.hist[this.histI++ & 7] = e;
-        this.chE = 0;
-      }
-      // lesen
+      if ((this.w & (CH - 1)) === 0) this.detect();
+
       let l = this.read(this.L, this.pos), r = this.read(this.R, this.pos);
       this.pos += p;
       if (this.old) {
@@ -260,6 +300,7 @@ class KeyLockProcessor extends AudioWorkletProcessor {
       this.w -= shift;
       this.pos -= shift;
       if (this.old) this.old.pos -= shift;
+      if (this.pending !== null) this.pending -= shift;
     }
     return true;
   }
@@ -407,12 +448,20 @@ registerProcessor('scratch', ScratchProcessor);
 
 let recNode = null;
 
+// Kurze Prüfsumme des Worklet-Codes = Version (für Cache-Busting und zur Anzeige)
+const WORKLET_VERSION = (() => {
+  let h = 2166136261;
+  for (let i = 0; i < WORKLET_CODE.length; i++) h = Math.imul(h ^ WORKLET_CODE.charCodeAt(i), 16777619);
+  return (h >>> 0).toString(36);
+})();
+
 // Auf file:// blockiert Chrome Blob-URLs für Worklets, data:-URLs gehen aber.
 async function loadWorklets() {
   if (!ctx.audioWorklet) throw new Error('AudioWorklet nicht verfügbar');
   const urls = [
     // gehostet (z. B. auf claude.ai): eigene Datei neben der Seite
-    ...(location.protocol.startsWith('http') ? ['worklet.js'] : []),
+    // ?v=… ändert sich mit jedem neuen Worklet-Code: so lädt Safari nie eine alte Version aus dem Cache
+    ...(location.protocol.startsWith('http') ? ['worklet.js?v=' + WORKLET_VERSION] : []),
     'data:text/javascript;charset=utf-8,' + encodeURIComponent(WORKLET_CODE),
     URL.createObjectURL(new Blob([WORKLET_CODE], { type: 'text/javascript' })),
   ];
@@ -456,6 +505,7 @@ async function setupWorklets(decks) {
   recNode.connect(silent);
   silent.connect(ctx.destination);   // damit der Recorder sicher mitläuft
   document.body.dataset.worklets = 'ok';
+  setText(document.getElementById('buildId'), 'Audio ' + WORKLET_VERSION);   // welche Audio-Version läuft
 }
 
 // Safari gibt Audio erst nach einer Berührung frei – bei jeder Geste nachhaken

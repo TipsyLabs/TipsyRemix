@@ -90,7 +90,11 @@ html[data-wave-mode="vinyl"] .wave-zoom { cursor: pointer; }
 .logo { display: flex; align-items: center; gap: 10px; font-family: var(--font-cond); font-weight: 600; font-size: 26px; letter-spacing: .5px; }
 .logo-text b { font-weight: 700; color: var(--a); }
 .build-id { align-self: flex-end; margin-bottom: 4px; font: 500 10px var(--font-body); color: var(--muted); letter-spacing: .5px; }
-.lic-link { align-self: flex-end; margin-bottom: 4px; font: 500 10px var(--font-body); color: var(--muted); letter-spacing: .5px; text-decoration: underline; text-underline-offset: 2px; }
+.lic-link {
+  align-self: flex-end; margin-bottom: 4px; padding: 0; border: 0; background: none; cursor: pointer;
+  font: 500 10px var(--font-body); color: var(--muted); letter-spacing: .5px;
+  text-decoration: underline; text-underline-offset: 2px; touch-action: manipulation;
+}
 .lic-link:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }
 .logo-mark {
   width: 24px; height: 24px; border-radius: 50%; flex: none;
@@ -494,6 +498,32 @@ html[data-layout="flow"] .mode-switch { grid-column: 1 / -1; justify-self: cente
   transition: opacity .15s, transform .15s;
 }
 .toast.show { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+
+/* Lizenzen-Fenster */
+.lic-note {
+  position: absolute; inset: 0; z-index: 60;
+  display: flex; align-items: center; justify-content: center; padding: 24px;
+  background: rgba(5, 7, 10, .72);
+}
+.lic-note[hidden] { display: none; }
+.lic-card {
+  width: min(820px, 100%); height: 640px; max-height: 100%;
+  display: flex; flex-direction: column; gap: 12px;
+  padding: 18px 20px; background: var(--panel); border: 1px solid var(--line); border-radius: 16px;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, .6);
+}
+.lic-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.lic-title { font: 700 22px var(--font-cond); letter-spacing: .5px; }
+.lic-tabs { display: flex; flex-wrap: wrap; gap: 6px; }
+.lic-tabs .btn { min-height: 36px; font-size: 13px; }
+.lic-tabs .btn[aria-selected="true"] { background: var(--raised); border-color: var(--text); }
+.lic-text {
+  flex: 1; min-height: 0; margin: 0; padding: 14px; overflow: auto; overscroll-behavior: contain;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+  background: var(--well); border: 1px solid var(--line); border-radius: 10px;
+  color: var(--text); font: 13px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  -webkit-user-select: text; user-select: text; touch-action: pan-y; -webkit-overflow-scrolling: touch;
+}
 
 /* Hinweis nach ungewolltem Neuladen */
 .crash-note {

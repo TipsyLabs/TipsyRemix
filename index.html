@@ -16,7 +16,7 @@
   <div class="app">
     <header class="topbar">
       <div class="topbar-left">
-        <div class="logo"><span class="logo-mark"></span><span class="logo-text">Tipsy<b>Remix</b></span><span class="build-id" id="buildId"></span><a class="lic-link" href="THIRD_PARTY_NOTICES.txt" target="_blank" rel="noopener" title="Verwendete Komponenten anderer Urheber und ihre Lizenzen">Lizenzen</a></div>
+        <div class="logo"><span class="logo-mark"></span><span class="logo-text">Tipsy<b>Remix</b></span><span class="build-id" id="buildId"></span><button class="lic-link" id="licOpen" aria-haspopup="dialog" title="Verwendete Komponenten anderer Urheber und ihre Lizenzen">Lizenzen</button></div>
         <div class="recordings" id="recordings"></div>
       </div>
       <div class="mode-switch" id="waveMode" role="radiogroup" aria-label="Wellenform-Modus">
@@ -76,6 +76,18 @@
     </aside>
 
     <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+    <!-- Lizenzen: Fenster in der App (kein Seitenwechsel – auf dem iPad bliebe man sonst hängen) -->
+    <div class="lic-note" id="licNote" role="dialog" aria-modal="true" aria-labelledby="licTitle" hidden>
+      <div class="lic-card">
+        <div class="lic-head">
+          <div class="lic-title" id="licTitle">Lizenzen</div>
+          <button class="btn small" id="licClose">Schließen</button>
+        </div>
+        <div class="lic-tabs" id="licTabs" role="tablist"></div>
+        <pre class="lic-text" id="licText" tabindex="0"></pre>
+      </div>
+    </div>
 
     <!-- erscheint nur, wenn der Browser die Seite von sich aus neu geladen hat -->
     <div class="crash-note" id="crashNote" role="alertdialog" aria-labelledby="crashTitle" hidden>

@@ -2254,6 +2254,7 @@ const keyActions = {
 
 document.addEventListener('keydown', e => {
   if (e.ctrlKey || e.metaKey || e.altKey) return;
+  if (!document.getElementById('licNote').hidden) return;   // Lizenzen-Fenster offen: keine Deck-Kürzel
   const k = e.key.toLowerCase();
   if (k === 'w' && !e.repeat) { deckA.cueDown(); return; }
   if (k === 'p' && !e.repeat) { deckB.cueDown(); return; }
@@ -2955,6 +2956,70 @@ window.addEventListener('pagehide', () => diagWrite(DIAG_KEY, { alive: false, ts
 })();
 diagHeartbeat();
 setInterval(diagHeartbeat, 2000);
+
+/* ---------------- Lizenzen: Fenster in der App ----------------
+   Die Texte werden nachgeladen und hier angezeigt, statt eine neue Seite zu
+   öffnen – auf dem iPad (vom Home-Bildschirm) käme man sonst nicht zurück. */
+
+const LICENSE_FILES = [
+  ['Übersicht', 'THIRD_PARTY_NOTICES.txt'],
+  ['lamejs', 'licenses/lamejs-LICENSE.txt'],
+  ['LGPL-3.0', 'licenses/LGPL-3.0.txt'],
+  ['GPL-3.0', 'licenses/GPL-3.0.txt'],
+  ['OFL-1.1 (Barlow)', 'licenses/OFL-1.1-Barlow.txt'],
+];
+const licNote = document.getElementById('licNote');
+const licText = document.getElementById('licText');
+const licTabs = document.getElementById('licTabs');
+const licCache = {};
+let licReturnFocus = null;
+
+async function showLicense(file) {
+  for (const b of licTabs.children) b.setAttribute('aria-selected', String(b.dataset.file === file));
+  licText.scrollTop = 0;
+  if (!licCache[file]) {
+    licText.textContent = 'Lade …';
+    try {
+      const r = await fetch(file);
+      if (!r.ok) throw new Error(r.status);
+      licCache[file] = await r.text();
+    } catch (_) {
+      licText.textContent = `Die Datei „${file}“ konnte nicht geladen werden.
+
+` +
+        'Wird TipsyRemix als lokale Datei geöffnet, blockiert der Browser das Nachladen. ' +
+        'Die Texte liegen im Projektordner (THIRD_PARTY_NOTICES.txt und Ordner licenses) ' +
+        'und online unter https://tipsylabs.github.io/TipsyRemix/' + file;
+      return;
+    }
+  }
+  licText.textContent = licCache[file];
+}
+
+for (const [label, file] of LICENSE_FILES) {
+  const b = document.createElement('button');
+  b.className = 'btn small';
+  b.textContent = label;
+  b.dataset.file = file;
+  b.setAttribute('role', 'tab');
+  b.addEventListener('click', () => showLicense(file));
+  licTabs.append(b);
+}
+
+function openLicenses() {
+  licReturnFocus = document.activeElement;
+  licNote.hidden = false;
+  showLicense(LICENSE_FILES[0][1]);
+  document.getElementById('licClose').focus();
+}
+function closeLicenses() {
+  licNote.hidden = true;
+  if (licReturnFocus && licReturnFocus.focus) licReturnFocus.focus();
+}
+document.getElementById('licOpen').addEventListener('click', openLicenses);
+document.getElementById('licClose').addEventListener('click', closeLicenses);
+licNote.addEventListener('click', e => { if (e.target === licNote) closeLicenses(); });   // daneben tippen = schließen
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && !licNote.hidden) closeLicenses(); });
 
 /* ---------------- Ein Bildschirm: Konsole passend skalieren ----------------
    Die Konsole wird in einer festen Entwurfsbreite gesetzt (quer 1180 px,

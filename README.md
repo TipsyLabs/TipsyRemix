@@ -23,5 +23,8 @@
 
 ## Entwicklung
 - `index.html`, `style.css`, `app.js` – die App (ohne Build-Schritt lauffähig)
-- `lib/lame.min.js` – MP3-Encoder [lamejs](https://github.com/zhuker/lamejs) (LGPL)
+- `lib/lame.min.js` – MP3-Encoder [lamejs](https://github.com/zhuker/lamejs) (LGPL-3.0, siehe THIRD_PARTY_NOTICES.txt)
 - `node build.js` – erzeugt `dist/` als Einzelseite für claude.ai
+
+## Lizenzen von Drittanbietern
+TipsyRemix verwendet **lamejs** (MP3-Encoder, LGPL-3.0, unverändert, als eigene Datei `lib/lame.min.js`) und die Schriften **Barlow/Barlow Condensed** (SIL OFL 1.1, über Google Fonts). Details und vollständige Lizenztexte: [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt) und der Ordner [licenses/](licenses/).

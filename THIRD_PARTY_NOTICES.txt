@@ -1,0 +1,72 @@
+TipsyRemix – Hinweise zu Drittanbieter-Komponenten (Third-Party Notices)
+========================================================================
+
+Stand: 7. Oktober 2026
+
+TipsyRemix verwendet die unten aufgeführten Komponenten anderer Urheber.
+Alle übrigen Teile von TipsyRemix (Programmcode, Gestaltung, Texte) sind
+nicht Teil dieser Hinweise und unterliegen den Bedingungen des Anbieters
+von TipsyRemix.
+
+TipsyRemix enthält keine Musik. Songs, die Nutzer laden, bleiben auf
+ihrem Gerät und unterliegen den Rechten ihrer jeweiligen Inhaber.
+
+
+1. lamejs – MP3-Encoder (für die Aufnahme „REC“)
+------------------------------------------------
+
+Komponente:   lamejs, Version 1.2.1
+Datei:        lib/lame.min.js (eigene, separate Datei; unverändert)
+Urheber:      Alex Zhukov (JavaScript-Portierung von LAME);
+              LAME: The LAME Project
+Lizenz:       GNU Lesser General Public License, Version 3 (LGPL-3.0)
+Quellcode:    https://github.com/zhuker/lamejs
+              https://www.npmjs.com/package/lamejs
+LAME-Projekt: https://lame.sourceforge.io  (früher lame.sourceforge.net)
+
+TipsyRemix verwendet LAME in Form von lamejs. lamejs wurde nicht
+verändert. Die Bibliothek wird als eigenständige Datei geladen und kann
+durch eine andere, kompatible Version ersetzt werden (Schnittstelle
+„lamejs.Mp3Encoder“). Der vollständige Quellcode von lamejs ist unter den
+oben genannten Adressen erhältlich.
+
+Lizenztexte in diesem Paket:
+  licenses/lamejs-LICENSE.txt   Lizenzhinweis von lamejs
+  licenses/LGPL-3.0.txt         GNU Lesser General Public License v3
+  licenses/GPL-3.0.txt          GNU General Public License v3
+                                (die LGPL-3.0 baut auf der GPL-3.0 auf)
+
+Hinweis aus licenses/lamejs-LICENSE.txt (Original, Englisch):
+
+  Can I use LAME in my commercial program?
+
+  Yes, you can, under the restrictions of the LGPL.  The easiest
+  way to do this is to:
+
+  1. Link to LAME as separate jar (lame.min.js or lame.all.js)
+
+  2. Fully acknowledge that you are using LAME, and give a link
+     to our web site, lame.sourceforge.net
+
+  3. If you make modifications to LAME, you *must* release these
+     these modifications back to the LAME project, under the LGPL.
+
+
+2. Schriften „Barlow“ und „Barlow Condensed“
+--------------------------------------------
+
+Urheber:      Copyright 2017 The Barlow Project Authors
+              (https://github.com/jpt/barlow)
+Lizenz:       SIL Open Font License, Version 1.1 (OFL-1.1)
+Einbindung:   werden über Google Fonts geladen (fonts.googleapis.com),
+              nicht mit TipsyRemix ausgeliefert
+Lizenztext:   licenses/OFL-1.1-Barlow.txt
+              https://openfontlicense.org
+
+
+3. Plattform-Funktionen (keine Drittanbieter-Software)
+-----------------------------------------------------
+
+Wiedergabe, Effekte und Aufnahme nutzen die eingebauten Funktionen des
+Webbrowsers (Web Audio API, AudioWorklet, MediaRecorder). Dafür wird kein
+Code Dritter mit TipsyRemix ausgeliefert.

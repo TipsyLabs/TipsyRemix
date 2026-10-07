@@ -4,7 +4,7 @@ const fs = require('fs'), path = require('path');
 const proj = __dirname, out = path.join(__dirname, "dist");
 fs.mkdirSync(out, { recursive: true });
 const read = f => fs.readFileSync(path.join(proj, f), 'utf8');
-const html = read('index.html'), css = read('style.css'), app = read('app.js'), lame = read('lib/lame.min.js');
+const html = read('index.html'), css = read('style.css'), app = read('app.js');
 const body = html.slice(html.indexOf('<body>') + 6, html.indexOf('<script src="lib/lame.min.js">'));
 const fonts = html.match(/<link rel="stylesheet" href="https:\/\/fonts[^>]+>/)[0];
 const page = `<title>TipsyRemix</title>
@@ -14,9 +14,8 @@ ${fonts}
 ${css}
 </style>
 ${body.trim()}
-<script>
-${lame}
-</script>
+<!-- lamejs (LGPL-3.0) bleibt eine eigene, austauschbare Datei – siehe THIRD_PARTY_NOTICES.txt -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/lamejs/1.2.1/lame.min.js"></script>
 <script>
 ${app}
 </script>

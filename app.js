@@ -19,6 +19,7 @@ const EQ_HIGH_X = 2500;                 // Trennfrequenz Mitten/Höhen (Hz)
 const ECHO_MAX_DELAY = 2;               // s (1 Beat bei 30 BPM)
 const ECHO_FEEDBACK_MAX = 0.8;          // Rückkopplung höchstens (je Wiederholung ≥ -2 dB)
 const ECHO_WET = 0.9;
+const KEYLOCK_LATENCY = 0.05;           // s, feste Verzögerung durch den Key Lock (D0 im Worklet)
 const END_WARN_S = 30;                  // letzte Sekunden eines Songs: Wellenform pulsiert im Takt
 const ECHO_LEN_MIN = 1;                 // Ausklingzeit (s), einstellbar per Fader
 const ECHO_LEN_MAX = 5;
@@ -80,10 +81,11 @@ limiter.connect(recDest);
 
 /* ---------------- AudioWorklets: Key Lock + MP3-Aufnahme ----------------
    Key Lock: Die Quelle läuft mit geändertem Tempo (und damit geänderter Tonhöhe);
-   dieser Prozessor verschiebt die Tonhöhe um 1/Tempo zurück. Zwei
-   überblendete Leseköpfe auf einer Delay-Line (Granular-Pitch-Shift).
-   Ohne Pitch-Änderung läuft das Signal über eine gleich lange reine
-   Verzögerung, damit beide Decks immer dieselbe Latenz haben (Sync!).
+   dieser Prozessor verschiebt die Tonhöhe um 1/Tempo zurück – mit EINEM Lesekopf,
+   der nur zwischen den Schlägen springt und sich vor jedem Kick/Snare so ausrichtet,
+   dass der Schlag genau nach 50 ms herauskommt. (Die frühere Version mit zwei
+   überblendeten Köpfen spielte Schläge doppelt – klang wie zwei versetzte Songs.)
+   Alle Decks haben dieselbe feste Verzögerung, damit Sync stimmt.
    Recorder: sammelt das Master-Signal als PCM und schickt es in Blöcken
    an die Seite, wo es live zu MP3 kodiert wird. */
 
@@ -92,59 +94,172 @@ class KeyLockProcessor extends AudioWorkletProcessor {
   static get parameterDescriptors() {
     return [{ name: 'pitch', defaultValue: 1, minValue: 0.25, maxValue: 4, automationRate: 'k-rate' }];
   }
+  // Ein einziger Lesekopf läuft mit Faktor "pitch" über eine Delay-Line und korrigiert so die
+  // Tonhöhe. Weil er dabei langsam vom Schreibkopf wegdriftet, springt er ab und zu zurück
+  // (oder vor). Diese Sprünge setzt er nur dorthin, wo im übersprungenen/wiederholten Stück
+  // kein Anschlag (Kick, Snare, Hi-Hat) liegt, und an die Stelle, an der die Wellenform am
+  // besten passt (Korrelation) – so wird kein Schlag doppelt gespielt oder verschluckt.
+  // Kommt ein kräftiger Schlag (Kick/Snare) herein, springt er kurz davor so, dass genau
+  // dieser Schlag mit der Soll-Verzögerung herauskommt: die Schläge bleiben auf dem Grid
+  // (wichtig für den Sync mit dem anderen Deck), der Sprung liegt im leisen Ende des Beats.
   constructor() {
     super();
-    this.size = 1 << 15;
-    this.mask = this.size - 1;
-    this.buf = [new Float32Array(this.size), new Float32Array(this.size)];
-    this.w = 0;
-    this.G = 2 * Math.round(sampleRate * 0.03);   // grain ~60 ms
-    this.phase = 0;
-    this.mix = 0;
+    this.N = 1 << 16;                                   // Ringpuffer (≈ 1,4 s)
+    this.mask = this.N - 1;
+    this.L = new Float32Array(this.N);
+    this.R = new Float32Array(this.N);
+    this.CH = 64;                                       // Rahmen der Anschlagserkennung
+    this.onsets = new Uint8Array(this.N / this.CH);
+    this.chMask = this.N / this.CH - 1;
+    this.chE = 0;
+    this.hist = new Float32Array(8);
+    this.histI = 0;
+    // Kick/Snare erkennt man am Bass-/Mittenanteil, Hi-Hats haben dort kaum Energie
+    this.lpA = 1 - Math.exp(-2 * Math.PI * 400 / sampleRate);
+    this.lp = 0;
+    this.chLow = 0;
+    this.histLow = new Float32Array(8);
+    this.prevFlag = 0;
+    this.peakLow = 0;                                    // langsam fallende Spitzen der Energie
+    this.peakAll = 0;
+    this.w = 0;                                         // nächste Schreibposition (absolut)
+    this.D0 = Math.round(0.05 * sampleRate);            // Soll-Verzögerung (für alle Decks gleich)
+    this.pos = -this.D0;                                // Lesekopf (absolut, gebrochen)
+    this.old = null;                                    // ausblendender Lesekopf beim Sprung
+    this.xf = 0;
+    this.Lc = Math.round(0.008 * sampleRate);           // Überblendung beim Sprung
+    this.Wc = Math.round(0.010 * sampleRate);           // Vergleichsfenster für die Korrelation
+    this.S = Math.round(0.004 * sampleRate);            // Suchbereich ± um das Sprungziel
+    this.margin = this.S + Math.round(0.003 * sampleRate);
+    this.protectStrong = Math.round(0.06 * sampleRate);   // nach Kick/Snare: Ausklang schützen
+    this.protectWeak = Math.round(0.015 * sampleRate);    // nach Hi-Hat & Co.
+    this.ref = new Float32Array(this.Wc);
+    this.pending = null;                                // kräftiger Anschlag, auf den ausgerichtet wird
   }
-  read(ch, pos) {
-    const i = Math.floor(pos), f = pos - i, b = this.buf[ch], m = this.mask;
-    return b[i & m] * (1 - f) + b[(i + 1) & m] * f;
+  read(buf, pos) {
+    const i = Math.floor(pos), f = pos - i, m = this.mask;
+    return buf[i & m] * (1 - f) + buf[(i + 1) & m] * f;
+  }
+  mono(pos) { return this.read(this.L, pos) + this.read(this.R, pos); }
+  // Darf zwischen den absoluten Positionen a und b gesprungen werden? Nicht, wenn dort ein
+  // Anschlag liegt oder das Stück noch im Ausklang eines Anschlags kurz davor steckt.
+  hasOnset(a, b) {
+    const CH = this.CH, cs = Math.floor((a - this.protectStrong) / CH), cw = Math.floor((a - this.protectWeak) / CH);
+    const c1 = Math.floor(b / CH);
+    for (let c = cs; c <= c1; c++) {
+      const f = this.onsets[c & this.chMask];
+      if (f === 2 || (f === 1 && c >= cw)) return true;
+    }
+    return false;
+  }
+  // Sprung zum Ziel; genaue Stelle per Korrelation mit dem, was der alte Kopf gleich spielt
+  splice(target, p) {
+    const Wc = this.Wc, ref = this.ref;
+    for (let i = 0; i < Wc; i++) ref[i] = this.mono(this.pos + i * p);
+    let best = target, bestScore = -Infinity;
+    const lim = this.w - Wc * p - 2;                  // nichts lesen, was noch nicht geschrieben ist
+    for (let c = target - this.S; c <= target + this.S; c += 2) {
+      if (c > lim) break;
+      let dot = 0, en = 1e-9;
+      for (let i = 0; i < Wc; i += 2) { const v = this.mono(c + i * p); dot += ref[i] * v; en += v * v; }
+      const sc = dot / Math.sqrt(en);
+      if (sc > bestScore) { bestScore = sc; best = c; }
+    }
+    this.old = { pos: this.pos };
+    this.pos = best;
+    this.xf = 0;
   }
   process(inputs, outputs, params) {
     const inp = inputs[0], out = outputs[0];
     const oL = out[0], oR = out[1] || out[0];
     const iL = inp[0], iR = inp[1] || inp[0];
-    const p = params.pitch[0];
-    const shifting = Math.abs(p - 1) > 1e-4;
-    const target = shifting ? 1 : 0;
-    const G = this.G, half = G / 2, step = (1 - p) / G, mask = this.mask;
-    const bL = this.buf[0], bR = this.buf[1];
-    for (let i = 0; i < oL.length; i++) {
-      const w = this.w;
-      bL[w] = iL ? iL[i] : 0;
-      bR[w] = iR ? iR[i] : 0;
-      const d = (w - half) & mask;
-      let l = bL[d], r = bR[d];
-      if (shifting || this.mix > 0) {
-        let sl = 0, sr = 0;
-        for (let h = 0; h < 2; h++) {
-          let ph = this.phase + h * 0.5;
-          if (ph >= 1) ph -= 1;
-          const s = Math.sin(Math.PI * ph);
-          const win = s * s;
-          const pos = w - ph * G + this.size;
-          sl += win * this.read(0, pos);
-          sr += win * this.read(1, pos);
-        }
-        if (this.mix !== target) {
-          this.mix = target > this.mix ? Math.min(1, this.mix + 1 / 1024) : Math.max(0, this.mix - 1 / 1024);
-        }
-        l += (sl - l) * this.mix;
-        r += (sr - r) * this.mix;
+    const n = oL.length, p = params.pitch[0], sr = sampleRate;
+
+    // Kräftiger Anschlag im Anmarsch: so springen, dass er genau mit Verzögerung D0 herauskommt
+    if (this.pending !== null && !this.old) {
+      const q = this.pending;
+      this.pending = null;
+      // Leseposition r, ab der der Kopf (Faktor p) den Anschlag q nach (D0 - Alter) Samples erreicht
+      const target = q - p * (this.D0 - (this.w - q));
+      const jump = Math.abs(target - this.pos);
+      const safe = target + this.Lc * p + this.margin < q && this.pos < q - this.margin;
+      if (jump > 0.0005 * sr && safe &&
+          !this.hasOnset(Math.min(this.pos, target) - this.margin, Math.max(this.pos, target) + this.Lc + this.margin)) {
+        this.splice(target, p);
       }
-      if (shifting) {
-        this.phase += step;
-        this.phase -= Math.floor(this.phase);
+    }
+
+    // Sprung nötig/erlaubt? (zu Beginn jedes Blocks, nicht während einer Überblendung)
+    if (!this.old) {
+      const D = this.w - this.pos;                     // aktuelle Verzögerung in Samples
+      const dev = (D - this.D0) / sr;
+      const R = Math.min(0.035, 0.006 + 0.2 * Math.abs(1 - p));   // erlaubte Abweichung (s)
+      let want = null;
+      // erst ab der halben erlaubten Abweichung springen (seltener, dafür passend platziert)
+      if (p < 1 - 1e-6) { if (dev > 0.5 * R) want = this.D0 - 0.6 * R * sr; }
+      else if (p > 1 + 1e-6) { if (dev < -0.5 * R) want = this.D0 + 0.6 * R * sr; }
+      else if (Math.abs(dev) > 0.001) want = this.D0;
+      if (want !== null) {
+        const target = this.w - want;
+        const forced = Math.abs(dev) >= R || D < 2 * this.Wc;
+        const a = Math.min(this.pos, target) - this.margin;
+        const b = Math.max(this.pos, target) + this.Lc + this.margin;
+        if (forced || !this.hasOnset(a, b)) this.splice(target, p);
+      }
+    }
+
+    const m = this.mask, CH = this.CH;
+    for (let i = 0; i < n; i++) {
+      // schreiben + Anschläge erkennen (Energie eines 64er-Rahmens gegen die 8 davor)
+      const xl = iL ? iL[i] : 0, xr = iR ? iR[i] : 0;
+      const wi = this.w & m;
+      this.L[wi] = xl;
+      this.R[wi] = xr;
+      this.chE += xl * xl + xr * xr;
+      this.lp += this.lpA * (xl + xr - this.lp);
+      this.chLow += this.lp * this.lp;
+      this.w++;
+      if ((this.w & (CH - 1)) === 0) {
+        const e = this.chE / CH, el = this.chLow / CH;
+        let avg = 0, avgLow = 0;
+        for (let k = 0; k < 8; k++) { avg += this.hist[k]; avgLow += this.histLow[k]; }
+        avg /= 8;
+        avgLow /= 8;
+        // 2 = kräftig (Bass/Mitten springen: Kick, Snare), 1 = leicht (Hi-Hat & Co.)
+        this.peakLow = Math.max(el, this.peakLow * 0.9995);
+        this.peakAll = Math.max(e, this.peakAll * 0.9995);
+        // Schwebungen zwischen Tönen lassen die Energie auch ohne Anschlag pulsieren –
+        // deshalb deutlicher Sprung UND eine Mindestlautstärke relativ zu den letzten Spitzen
+        const flag = el > 6 * avgLow + 1e-8 && el > 0.1 * this.peakLow ? 2
+          : e > 4 * avg + 1e-8 && e > 0.02 * this.peakAll ? 1 : 0;
+        this.histLow[this.histI & 7] = el;
+        this.chLow = 0;
+        this.onsets[((this.w / CH) - 1) & this.chMask] = flag;
+        // neuer kräftiger Anschlag (der vorige Rahmen war noch keiner) → darauf ausrichten
+        if (flag === 2 && this.prevFlag !== 2) this.pending = this.w - CH;
+        this.prevFlag = flag;
+        this.hist[this.histI++ & 7] = e;
+        this.chE = 0;
+      }
+      // lesen
+      let l = this.read(this.L, this.pos), r = this.read(this.R, this.pos);
+      this.pos += p;
+      if (this.old) {
+        const g = this.xf / this.Lc;
+        l = l * g + this.read(this.L, this.old.pos) * (1 - g);
+        r = r * g + this.read(this.R, this.old.pos) * (1 - g);
+        this.old.pos += p;
+        if (++this.xf >= this.Lc) this.old = null;
       }
       oL[i] = l;
       oR[i] = r;
-      this.w = (w + 1) & mask;
+    }
+    // Positionen klein halten (Vielfache der Puffergröße abziehen ändert nichts am Inhalt)
+    if (this.w > 1e9) {
+      const shift = (Math.floor(this.w / this.N) - 1) * this.N;
+      this.w -= shift;
+      this.pos -= shift;
+      if (this.old) this.old.pos -= shift;
     }
     return true;
   }
@@ -895,6 +1010,13 @@ class Deck {
     return Math.min(p, this.duration);
   }
 
+  // Was gerade zu hören ist: der Key Lock verzögert den Klang um KEYLOCK_LATENCY.
+  // Für Wellenform, Zeitanzeige und Endwarnung, damit Bild und Ton zusammenpassen.
+  get displayPosition() {
+    if (!this.playing || !this.keyLockNode) return this.position;
+    return Math.max(0, this.position - KEYLOCK_LATENCY * this.effRate);
+  }
+
   rebase() {
     this.offset = this.position;
     this.startTime = ctx.currentTime;
@@ -1581,7 +1703,7 @@ class Deck {
     c.fillRect(0, 0, W, H);
     if (!this.wave) return;
 
-    const pos = this.position;
+    const pos = this.displayPosition;
     const span = this.zoomSpan;
     const t0 = pos - span / 2;
     const spp = span / W;
@@ -1657,7 +1779,7 @@ class Deck {
   // Sekunden (Echtzeit) bis zum hörbaren Ende des Songs
   remainingReal() {
     if (!this.wave) return Infinity;
-    return (this.wave.soundEnd - this.position) / this.rate;
+    return (this.wave.soundEnd - this.displayPosition) / this.rate;
   }
 
   // 0…1: Stärke des Endwarnungs-Pulses in diesem Moment (nur beim Abspielen, letzte 30 s).
@@ -1669,9 +1791,9 @@ class Deck {
     let q;
     if (this.bpm) {
       const beat = 60 / this.bpm;
-      q = mod((this.position - this.firstBeat) / beat, 4);   // 0 = "1" des Takts
+      q = mod((this.displayPosition - this.firstBeat) / beat, 4);   // 0 = "1" des Takts
     } else {
-      q = mod(this.position, 2) * 2;
+      q = mod(this.displayPosition, 2) * 2;
     }
     if (q >= 1) return 0;
     const strength = rem <= 10 ? 1 : 0.75;                  // letzte 10 s etwas kräftiger
@@ -1688,7 +1810,7 @@ class Deck {
     if (this.ovCache) c.drawImage(this.ovCache, 0, 0, W, H);
     const d = this.duration;
     const xOf = t => t / d * W;
-    const px = xOf(this.position);
+    const px = xOf(this.displayPosition);
     c.fillStyle = 'rgba(0,0,0,0.5)';
     c.fillRect(0, 0, px, H);
     if (this.loop) {
@@ -1727,7 +1849,7 @@ class Deck {
     this.drawZoom();
     this.drawOverview();
     const el = this.el;
-    const pos = this.position;
+    const pos = this.displayPosition;
     setText(el.time, fmtTime(pos));
     setText(el.remain, '-' + fmtTime(this.duration - pos));
     el.remain.classList.toggle('ending', this.remainingReal() <= END_WARN_S && this.duration > 0);
